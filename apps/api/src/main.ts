@@ -68,6 +68,10 @@ type SocketAuthPayload = ListenerSocketAuth | BroadcasterSocketAuth;
 const attempts = new Map<string, { count: number; until: number }>();
 const listenerSocketsBySession = new Map<string, Set<string>>();
 const broadcasterSocketsBySession = new Map<string, Set<string>>();
+const listenerStateBySocket = new Map<string, { sessionId: string; channelId?: string; joinedAt?: number }>();
+const liveListenerCountsBySessionChannel = new Map<string, Map<string, number>>();
+const sessionLiveSeries = new Map<string, Array<{ ts: number; total: number; channels: Record<string, number> }>>();
+const MAX_LIVE_POINTS = 180;
 
 function isListenerAuth(auth: SocketAuthPayload): auth is ListenerSocketAuth {
   return auth.role === "LISTENER";
@@ -224,6 +228,57 @@ function removeSocketFromRoleMap(map: Map<string, Set<string>>, sessionId: strin
   if (set.size === 0) map.delete(sessionId);
 }
 
+function changeLiveListenerCount(sessionId: string, channelId: string, delta: number): void {
+  const channelMap = liveListenerCountsBySessionChannel.get(sessionId) ?? new Map<string, number>();
+  const prev = channelMap.get(channelId) ?? 0;
+  const next = Math.max(0, prev + delta);
+  if (next <= 0) {
+    channelMap.delete(channelId);
+  } else {
+    channelMap.set(channelId, next);
+  }
+  if (channelMap.size === 0) {
+    liveListenerCountsBySessionChannel.delete(sessionId);
+  } else {
+    liveListenerCountsBySessionChannel.set(sessionId, channelMap);
+  }
+}
+
+function getLiveListenerChannelCounts(sessionId: string): Record<string, number> {
+  const channelMap = liveListenerCountsBySessionChannel.get(sessionId);
+  if (!channelMap) return {};
+  const out: Record<string, number> = {};
+  for (const [channelId, count] of channelMap.entries()) {
+    out[channelId] = count;
+  }
+  return out;
+}
+
+function getLiveListenerTotal(sessionId: string): number {
+  const channelMap = liveListenerCountsBySessionChannel.get(sessionId);
+  if (!channelMap) return 0;
+  let total = 0;
+  for (const count of channelMap.values()) total += count;
+  return total;
+}
+
+function recordLiveSnapshot(sessionId: string): void {
+  const history = sessionLiveSeries.get(sessionId) ?? [];
+  const channels = getLiveListenerChannelCounts(sessionId);
+  history.push({
+    ts: Date.now(),
+    total: Object.values(channels).reduce((sum, value) => sum + value, 0),
+    channels
+  });
+  while (history.length > MAX_LIVE_POINTS) history.shift();
+  sessionLiveSeries.set(sessionId, history);
+}
+
+function clearSessionAnalyticsState(sessionId: string): void {
+  sessionLiveSeries.delete(sessionId);
+  recordLiveSnapshot(sessionId);
+}
+
 async function getEffectiveAdminPasswordHash(): Promise<string> {
   const config = await prisma.appConfig.findUnique({
     where: { key: ADMIN_PASSWORD_CONFIG_KEY },
@@ -280,6 +335,150 @@ async function fetchLiveChannelIds(sessionId: string): Promise<string[]> {
   }
 }
 
+function toCsvValue(value: string | number): string {
+  if (typeof value === "number") return String(value);
+  const escaped = value.replaceAll("\"", "\"\"");
+  return `"${escaped}"`;
+}
+
+async function buildSessionAnalytics(sessionId: string): Promise<{
+  live: {
+    listenersPerChannel: Array<{ channelId: string; name: string; listeners: number }>;
+    totalListeners: number;
+    peakListeners: number;
+    joinRatePerMin: number;
+    leaveRatePerMin: number;
+  };
+  realtimeGraph: {
+    points: Array<{ ts: number; total: number }>;
+    perChannel: Array<{ channelId: string; name: string; points: Array<{ ts: number; listeners: number }> }>;
+  };
+  postSession: {
+    averageListeningDurationSec: number;
+    heatmap: Array<{ hour: number; joins: number }>;
+    channelComparison: Array<{
+      channelId: string;
+      name: string;
+      joins: number;
+      leaves: number;
+      averageListeningDurationSec: number;
+      peakListeners: number;
+    }>;
+  };
+}> {
+  const channels = await prisma.channel.findMany({
+    where: { sessionId, isActive: true },
+    select: { id: true, name: true }
+  });
+  const channelNameById = new Map(channels.map((channel) => [channel.id, channel.name]));
+
+  const now = Date.now();
+  const last24h = new Date(now - 24 * 60 * 60 * 1000);
+  const logs = await prisma.accessLog.findMany({
+    where: {
+      sessionId,
+      createdAt: { gte: last24h },
+      eventType: { in: ["LISTENER_JOIN", "LISTENER_LEAVE"] }
+    },
+    select: { channelId: true, eventType: true, createdAt: true, reason: true },
+    orderBy: { createdAt: "asc" }
+  });
+
+  const liveCounts = getLiveListenerChannelCounts(sessionId);
+  const listenersPerChannel = channels.map((channel) => ({
+    channelId: channel.id,
+    name: channel.name,
+    listeners: liveCounts[channel.id] ?? 0
+  }));
+  const totalListeners = getLiveListenerTotal(sessionId);
+
+  const history = (sessionLiveSeries.get(sessionId) ?? []).slice(-120);
+  const peakListeners = history.reduce((max, point) => Math.max(max, point.total), totalListeners);
+
+  const last10min = logs.filter((log) => log.createdAt.getTime() >= now - 10 * 60 * 1000);
+  const joins10 = last10min.filter((log) => log.eventType === "LISTENER_JOIN").length;
+  const leaves10 = last10min.filter((log) => log.eventType === "LISTENER_LEAVE").length;
+  const joinRatePerMin = joins10 / 10;
+  const leaveRatePerMin = leaves10 / 10;
+
+  const hourBuckets = Array.from({ length: 24 }, (_, hour) => ({ hour, joins: 0 }));
+  for (const log of logs) {
+    if (log.eventType !== "LISTENER_JOIN") continue;
+    hourBuckets[log.createdAt.getHours()].joins += 1;
+  }
+
+  const durationsByChannel = new Map<string, number[]>();
+  for (const log of logs) {
+    if (log.eventType !== "LISTENER_LEAVE" || !log.channelId || !log.reason) continue;
+    const match = /durationMs=(\d+)/.exec(log.reason);
+    if (!match) continue;
+    const durationSec = Number(match[1]) / 1000;
+    const list = durationsByChannel.get(log.channelId) ?? [];
+    list.push(durationSec);
+    durationsByChannel.set(log.channelId, list);
+  }
+
+  const allDurations = Array.from(durationsByChannel.values()).flat();
+  const averageListeningDurationSec =
+    allDurations.length > 0 ? allDurations.reduce((sum, value) => sum + value, 0) / allDurations.length : 0;
+
+  const joinsByChannel = new Map<string, number>();
+  const leavesByChannel = new Map<string, number>();
+  for (const log of logs) {
+    if (!log.channelId) continue;
+    if (log.eventType === "LISTENER_JOIN") {
+      joinsByChannel.set(log.channelId, (joinsByChannel.get(log.channelId) ?? 0) + 1);
+    } else if (log.eventType === "LISTENER_LEAVE") {
+      leavesByChannel.set(log.channelId, (leavesByChannel.get(log.channelId) ?? 0) + 1);
+    }
+  }
+
+  const peakByChannel = new Map<string, number>();
+  for (const point of history) {
+    for (const [channelId, value] of Object.entries(point.channels)) {
+      peakByChannel.set(channelId, Math.max(peakByChannel.get(channelId) ?? 0, value));
+    }
+  }
+
+  const channelComparison = channels.map((channel) => {
+    const durations = durationsByChannel.get(channel.id) ?? [];
+    const average = durations.length > 0 ? durations.reduce((sum, value) => sum + value, 0) / durations.length : 0;
+    return {
+      channelId: channel.id,
+      name: channel.name,
+      joins: joinsByChannel.get(channel.id) ?? 0,
+      leaves: leavesByChannel.get(channel.id) ?? 0,
+      averageListeningDurationSec: average,
+      peakListeners: peakByChannel.get(channel.id) ?? 0
+    };
+  });
+
+  const perChannelSeries = channels.map((channel) => ({
+    channelId: channel.id,
+    name: channel.name,
+    points: history.map((point) => ({ ts: point.ts, listeners: point.channels[channel.id] ?? 0 }))
+  }));
+
+  return {
+    live: {
+      listenersPerChannel,
+      totalListeners,
+      peakListeners,
+      joinRatePerMin,
+      leaveRatePerMin
+    },
+    realtimeGraph: {
+      points: history.map((point) => ({ ts: point.ts, total: point.total })),
+      perChannel: perChannelSeries
+    },
+    postSession: {
+      averageListeningDurationSec,
+      heatmap: hourBuckets,
+      channelComparison
+    }
+  };
+}
+
 async function findActiveSessionByCode(code: string) {
   const direct = await prisma.session.findFirst({
     where: { status: "ACTIVE", broadcastCode: code },
@@ -321,6 +520,16 @@ app.get("/health", async (_req, res) => {
   const channels = await prisma.channel.count({ where: { isActive: true } });
   res.json({ ok: true, sessions, channels });
 });
+
+setInterval(() => {
+  const sessionIds = new Set<string>([
+    ...Array.from(listenerSocketsBySession.keys()),
+    ...Array.from(liveListenerCountsBySessionChannel.keys())
+  ]);
+  for (const sessionId of sessionIds) {
+    recordLiveSnapshot(sessionId);
+  }
+}, 5000);
 
 app.get("/api/network", (req, res) => {
   const reqHost = req.get("host") ?? "";
@@ -549,6 +758,61 @@ app.get("/api/admin/sessions/:sessionId/stats", requireAdmin, async (req, res) =
   return res.json({ ...stats, liveChannelIds });
 });
 
+app.get("/api/admin/sessions/:sessionId/analytics", requireAdmin, async (req, res) => {
+  const sessionId = String(req.params.sessionId);
+  const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { id: true } });
+  if (!session) {
+    return res.status(404).json({ error: "Session not found" });
+  }
+  const analytics = await buildSessionAnalytics(sessionId);
+  return res.json(analytics);
+});
+
+app.get("/api/admin/sessions/:sessionId/analytics/export", requireAdmin, async (req, res) => {
+  const sessionId = String(req.params.sessionId);
+  const format = String(req.query.format ?? "json").toLowerCase();
+  const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { id: true, name: true } });
+  if (!session) {
+    return res.status(404).json({ error: "Session not found" });
+  }
+  const analytics = await buildSessionAnalytics(sessionId);
+
+  if (format === "csv") {
+    const rows: string[] = [];
+    rows.push("section,metric,value");
+    rows.push(`live,totalListeners,${toCsvValue(analytics.live.totalListeners)}`);
+    rows.push(`live,peakListeners,${toCsvValue(analytics.live.peakListeners)}`);
+    rows.push(`live,joinRatePerMin,${toCsvValue(analytics.live.joinRatePerMin.toFixed(2))}`);
+    rows.push(`live,leaveRatePerMin,${toCsvValue(analytics.live.leaveRatePerMin.toFixed(2))}`);
+    rows.push(`post,averageListeningDurationSec,${toCsvValue(analytics.postSession.averageListeningDurationSec.toFixed(2))}`);
+    for (const channel of analytics.postSession.channelComparison) {
+      rows.push(`channel,${toCsvValue(channel.name)} joins,${toCsvValue(channel.joins)}`);
+      rows.push(`channel,${toCsvValue(channel.name)} leaves,${toCsvValue(channel.leaves)}`);
+      rows.push(`channel,${toCsvValue(channel.name)} avgDurationSec,${toCsvValue(channel.averageListeningDurationSec.toFixed(2))}`);
+      rows.push(`channel,${toCsvValue(channel.name)} peakListeners,${toCsvValue(channel.peakListeners)}`);
+    }
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename=\"${session.name}-analytics.csv\"`);
+    return res.send(rows.join("\n"));
+  }
+
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename=\"${session.name}-analytics.json\"`);
+  return res.send(JSON.stringify(analytics, null, 2));
+});
+
+app.post("/api/admin/sessions/:sessionId/analytics/clear", requireAdmin, async (req, res) => {
+  const sessionId = String(req.params.sessionId);
+  const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { id: true } });
+  if (!session) {
+    return res.status(404).json({ error: "Session not found" });
+  }
+
+  await prisma.accessLog.deleteMany({ where: { sessionId } });
+  clearSessionAnalyticsState(sessionId);
+  return res.json({ ok: true });
+});
+
 app.delete("/api/admin/sessions/:sessionId", requireAdmin, async (req, res) => {
   const sessionId = String(req.params.sessionId);
   try {
@@ -747,13 +1011,33 @@ io.on("connection", (socket) => {
   socket.join(`session:${auth.sessionId}`);
   if (auth.role === "LISTENER") {
     addSocketToRoleMap(listenerSocketsBySession, auth.sessionId, socket.id);
+    listenerStateBySocket.set(socket.id, { sessionId: auth.sessionId });
+    recordLiveSnapshot(auth.sessionId);
   } else {
     addSocketToRoleMap(broadcasterSocketsBySession, auth.sessionId, socket.id);
   }
 
   socket.on("disconnect", () => {
     if (auth.role === "LISTENER") {
+      const state = listenerStateBySocket.get(socket.id);
+      if (state?.channelId) {
+        changeLiveListenerCount(auth.sessionId, state.channelId, -1);
+        const durationMs = state.joinedAt ? Math.max(0, Date.now() - state.joinedAt) : 0;
+        void prisma.accessLog
+          .create({
+            data: {
+              sessionId: auth.sessionId,
+              channelId: state.channelId,
+              eventType: "LISTENER_LEAVE",
+              success: true,
+              reason: `durationMs=${durationMs}`
+            }
+          })
+          .catch(() => {});
+      }
+      listenerStateBySocket.delete(socket.id);
       removeSocketFromRoleMap(listenerSocketsBySession, auth.sessionId, socket.id);
+      recordLiveSnapshot(auth.sessionId);
     } else {
       removeSocketFromRoleMap(broadcasterSocketsBySession, auth.sessionId, socket.id);
     }
@@ -778,11 +1062,45 @@ io.on("connection", (socket) => {
     }
 
     try {
+      const state = listenerStateBySocket.get(socket.id) ?? { sessionId: auth.sessionId };
+      if (state.channelId && state.channelId !== channelId) {
+        changeLiveListenerCount(auth.sessionId, state.channelId, -1);
+        const durationMs = state.joinedAt ? Math.max(0, Date.now() - state.joinedAt) : 0;
+        void prisma.accessLog
+          .create({
+            data: {
+              sessionId: auth.sessionId,
+              channelId: state.channelId,
+              eventType: "LISTENER_LEAVE",
+              success: true,
+              reason: `durationMs=${durationMs}`
+            }
+          })
+          .catch(() => {});
+      }
+      if (state.channelId !== channelId) {
+        changeLiveListenerCount(auth.sessionId, channelId, 1);
+      }
+      state.channelId = channelId;
+      state.joinedAt = Date.now();
+      listenerStateBySocket.set(socket.id, state);
+      recordLiveSnapshot(auth.sessionId);
+
       const response = await axios.post(`${MEDIA_BASE_URL}/listeners/join`, {
         clientId: socket.id,
         sessionId: auth.sessionId,
         channelId
       });
+      void prisma.accessLog
+        .create({
+          data: {
+            sessionId: auth.sessionId,
+            channelId,
+            eventType: "LISTENER_JOIN",
+            success: true
+          }
+        })
+        .catch(() => {});
       cb(response.data);
     } catch {
       cb({ error: "Media join failed" });

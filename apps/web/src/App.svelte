@@ -14,6 +14,31 @@
     joinEvents24h: number;
     activeProducerChannels: number;
   };
+  type SessionAnalytics = {
+    live: {
+      listenersPerChannel: Array<{ channelId: string; name: string; listeners: number }>;
+      totalListeners: number;
+      peakListeners: number;
+      joinRatePerMin: number;
+      leaveRatePerMin: number;
+    };
+    realtimeGraph: {
+      points: Array<{ ts: number; total: number }>;
+      perChannel: Array<{ channelId: string; name: string; points: Array<{ ts: number; listeners: number }> }>;
+    };
+    postSession: {
+      averageListeningDurationSec: number;
+      heatmap: Array<{ hour: number; joins: number }>;
+      channelComparison: Array<{
+        channelId: string;
+        name: string;
+        joins: number;
+        leaves: number;
+        averageListeningDurationSec: number;
+        peakListeners: number;
+      }>;
+    };
+  };
   type AdminSessionSummary = {
     id: string;
     name: string;
@@ -61,6 +86,8 @@
   let dashboardTab: "statistics" | "users" | "settings" | "sessions" = "statistics";
   let adminSessions: AdminSessionSummary[] = [];
   let selectedSessionId = "";
+  let analyticsSessionId = "";
+  let analyticsStatus = "";
 
   let createSessionName = "";
   let createSessionDescription = "";
@@ -81,6 +108,7 @@
     joinEvents24h: 0,
     activeProducerChannels: 0
   };
+  let sessionAnalytics: SessionAnalytics | null = null;
 
   let channelName = "Deutsch";
   let channelLanguage = "de";
@@ -239,6 +267,24 @@
     return ((clamped - minDb) / (maxDb - minDb)) * 100;
   }
 
+  function linePath(points: number[], width = 520, height = 180): string {
+    if (points.length === 0) return "";
+    const max = Math.max(1, ...points);
+    const stepX = points.length > 1 ? width / (points.length - 1) : width;
+    return points
+      .map((value, index) => {
+        const x = index * stepX;
+        const y = height - (value / max) * height;
+        return `${index === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+  }
+
+  function avg<T>(values: T[], mapper: (value: T) => number): number {
+    if (values.length === 0) return 0;
+    return values.reduce((sum, value) => sum + mapper(value), 0) / values.length;
+  }
+
   function meterBarClass(db: number): string {
     if (db > -12) return "bg-gradient-to-r from-amber-400 to-emerald-500";
     if (db > -24) return "bg-gradient-to-r from-orange-400 to-lime-500";
@@ -377,6 +423,52 @@
 
   async function loadAdminSessions(): Promise<void> {
     adminSessions = await fetchJson<AdminSessionSummary[]>(`${apiUrl}/api/admin/sessions`);
+    if (!analyticsSessionId && adminSessions.length > 0) {
+      analyticsSessionId = adminSessions[0].id;
+    }
+  }
+
+  async function loadSessionAnalytics(): Promise<void> {
+    if (!analyticsSessionId) {
+      sessionAnalytics = null;
+      return;
+    }
+    try {
+      sessionAnalytics = await fetchJson<SessionAnalytics>(`${apiUrl}/api/admin/sessions/${analyticsSessionId}/analytics`);
+      analyticsStatus = "";
+    } catch (error) {
+      analyticsStatus = `Fehler: ${(error as Error).message}`;
+    }
+  }
+
+  async function exportAnalytics(format: "csv" | "json"): Promise<void> {
+    if (!analyticsSessionId) return;
+    const response = await fetch(`${apiUrl}/api/admin/sessions/${analyticsSessionId}/analytics/export?format=${format}`, {
+      credentials: "include"
+    });
+    if (!response.ok) return;
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `analytics-${analyticsSessionId}.${format}`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function clearAnalytics(): Promise<void> {
+    if (!analyticsSessionId) return;
+    const ok = window.confirm("Statistiken für diese Session wirklich zurücksetzen?");
+    if (!ok) return;
+    try {
+      await fetchJson<{ ok: boolean }>(`${apiUrl}/api/admin/sessions/${analyticsSessionId}/analytics/clear`, {
+        method: "POST"
+      });
+      analyticsStatus = "Statistiken wurden zurückgesetzt.";
+      await loadSessionAnalytics();
+    } catch (error) {
+      analyticsStatus = `Fehler: ${(error as Error).message}`;
+    }
   }
 
   async function loadSelectedSession(): Promise<void> {
@@ -874,6 +966,14 @@
     }
   }
 
+  async function toggleChannelPlayback(channelId: string): Promise<void> {
+    if (isListening && activeListeningChannelId === channelId) {
+      await stopListening();
+      return;
+    }
+    await startListening(channelId);
+  }
+
   async function copy(text: string): Promise<void> {
     await navigator.clipboard.writeText(text);
   }
@@ -946,6 +1046,9 @@
       await loadAdminSession();
       if (adminAuthenticated) {
         await loadAdminSessions();
+        if (dashboardTab === "statistics") {
+          await loadSessionAnalytics();
+        }
         if (adminView === "detail" && selectedSessionId) {
           await loadSelectedSession();
         }
@@ -961,6 +1064,9 @@
     const statsInterval = setInterval(() => {
       if (isAdminRoute && adminAuthenticated && adminView === "detail" && selectedSessionId) {
         void refreshSessionStats();
+      }
+      if (isAdminRoute && adminAuthenticated && adminView === "dashboard" && dashboardTab === "statistics") {
+        void loadSessionAnalytics();
       }
       if (!isAdminRoute && listenerSessionId && listenerCode.trim()) {
         void refreshListenerLiveState();
@@ -981,6 +1087,11 @@
     sessionDescription;
     sessionImageUrl;
     scheduleAutoSaveSessionMeta();
+  }
+
+  $: if (isAdminRoute && adminAuthenticated && adminView === "dashboard" && dashboardTab === "statistics" && analyticsSessionId) {
+    analyticsSessionId;
+    void loadSessionAnalytics();
   }
 </script>
 
@@ -1033,25 +1144,93 @@
 
           <section>
             {#if dashboardTab === "statistics"}
-              <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-                  <p class="text-xs text-slate-500">Sessions</p>
-                  <p class="mt-1 text-3xl font-black">{adminSessions.length}</p>
-                </div>
-                <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-                  <p class="text-xs text-slate-500">Aktive Sessions</p>
-                  <p class="mt-1 text-3xl font-black">{adminSessions.filter((s) => s.status === "ACTIVE").length}</p>
-                </div>
-                <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-                  <p class="text-xs text-slate-500">Listener online</p>
-                  <p class="mt-1 text-3xl font-black">{adminSessions.reduce((sum, s) => sum + s.listenersConnected, 0)}</p>
-                </div>
-                <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-                  <p class="text-xs text-slate-500">Live Producer</p>
-                  <p class="mt-1 text-3xl font-black">{adminSessions.reduce((sum, s) => sum + s.activeProducerChannels, 0)}</p>
-                </div>
+              <div class="mb-4 flex flex-wrap items-center gap-2">
+                <select class="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900" bind:value={analyticsSessionId}>
+                  <option value="">Session wählen</option>
+                  {#each adminSessions as s}
+                    <option value={s.id}>{s.name}</option>
+                  {/each}
+                </select>
+                <button class="rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={loadSessionAnalytics}>Refresh</button>
+                <button class="rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800 disabled:opacity-50" onclick={() => exportAnalytics("csv")} disabled={!sessionAnalytics}>Export CSV</button>
+                <button class="rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800 disabled:opacity-50" onclick={() => exportAnalytics("json")} disabled={!sessionAnalytics}>Export JSON</button>
+                <button class="rounded-xl border border-red-300 px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-red-50 dark:border-red-800 dark:text-slate-100 dark:hover:bg-red-900/20 disabled:opacity-50" onclick={clearAnalytics} disabled={!sessionAnalytics}>Statistiken leeren</button>
               </div>
-              <button class="mt-4 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={loadAdminSessions}>Aktualisieren</button>
+
+              {#if sessionAnalytics}
+                <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+                  <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Live Listener</p><p class="mt-1 text-3xl font-black">{sessionAnalytics.live.totalListeners}</p></div>
+                  <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Peak Listener</p><p class="mt-1 text-3xl font-black">{sessionAnalytics.live.peakListeners}</p></div>
+                  <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Ø Hördauer</p><p class="mt-1 text-3xl font-black">{sessionAnalytics.postSession.averageListeningDurationSec.toFixed(0)}s</p></div>
+                  <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Join-Rate/min</p><p class="mt-1 text-3xl font-black">{sessionAnalytics.live.joinRatePerMin.toFixed(2)}</p></div>
+                  <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Leave-Rate/min</p><p class="mt-1 text-3xl font-black">{sessionAnalytics.live.leaveRatePerMin.toFixed(2)}</p></div>
+                </div>
+
+                <div class="mt-4 rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                  <h3 class="text-lg font-black">Listener pro Channel (Realtime-Graph)</h3>
+                  <svg class="mt-3 h-48 w-full rounded-xl bg-slate-50 dark:bg-slate-800" viewBox="0 0 520 180" preserveAspectRatio="none">
+                    <path d={linePath(sessionAnalytics.realtimeGraph.points.map((p) => p.total))} fill="none" stroke="#f97316" stroke-width="3"></path>
+                  </svg>
+                  <div class="mt-4 grid gap-2 sm:grid-cols-2">
+                    {#each sessionAnalytics.live.listenersPerChannel as channel}
+                      <div class="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
+                        <p class="text-sm font-semibold">{channel.name}</p>
+                        <p class="text-xs text-slate-500">{channel.listeners} live</p>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+
+                <div class="mt-4 grid gap-4 lg:grid-cols-2">
+                  <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                    <h3 class="text-lg font-black">Heatmap (Joins nach Stunde)</h3>
+                    <div class="mt-3 grid grid-cols-6 gap-2">
+                      {#each sessionAnalytics.postSession.heatmap as hour}
+                        <div class="rounded-lg p-2 text-center text-[11px] font-semibold text-slate-700 dark:text-slate-200" style={`background: rgba(249,115,22, ${Math.min(0.9, hour.joins / Math.max(1, ...sessionAnalytics.postSession.heatmap.map((h) => h.joins)))});`}>
+                          <div>{hour.hour}:00</div>
+                          <div>{hour.joins}</div>
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+
+                  <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                    <h3 class="text-lg font-black">Channel-Vergleich</h3>
+                    <div class="mt-3 overflow-auto">
+                      <table class="min-w-full text-xs">
+                        <thead>
+                          <tr class="text-left text-slate-500">
+                            <th class="py-1">Channel</th>
+                            <th class="py-1">Joins</th>
+                            <th class="py-1">Leaves</th>
+                            <th class="py-1">Peak</th>
+                            <th class="py-1">Ø Dauer</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {#each sessionAnalytics.postSession.channelComparison as row}
+                            <tr class="border-t border-slate-200 dark:border-slate-700">
+                              <td class="py-1 font-semibold">{row.name}</td>
+                              <td class="py-1">{row.joins}</td>
+                              <td class="py-1">{row.leaves}</td>
+                              <td class="py-1">{row.peakListeners}</td>
+                              <td class="py-1">{row.averageListeningDurationSec.toFixed(0)}s</td>
+                            </tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p class="mt-2 text-[11px] text-slate-500">Gesamt Ø Dauer: {avg(sessionAnalytics.postSession.channelComparison, (c) => c.averageListeningDurationSec).toFixed(0)}s</p>
+                  </div>
+                </div>
+                {#if analyticsStatus}
+                  <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">{analyticsStatus}</p>
+                {/if}
+              {:else}
+                <div class="rounded-2xl border border-dashed border-slate-300 bg-white p-8 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
+                  {analyticsStatus || "Keine Analytics verfügbar. Wähle eine Session."}
+                </div>
+              {/if}
             {:else if dashboardTab === "users"}
               <div class="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
                 <h3 class="text-xl font-black">Nutzerverwaltung</h3>
@@ -1159,41 +1338,41 @@
           </div>
 
           <div class="grid gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
-            <aside class="rounded-3xl bg-[#2f3a49] p-6 text-white shadow-xl">
+            <aside class="rounded-3xl border border-slate-200 bg-white p-6 text-slate-900 shadow-xl dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100">
               <div class="flex items-center justify-between">
                 <h2 class="text-3xl font-black">Speak</h2>
-                <button class="rounded-lg border border-white/30 px-2 py-1 text-xs" onclick={goToAdminList}>Back</button>
+                <button class="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={goToAdminList}>Back</button>
               </div>
 
-              <label for="edit-session-name" class="mt-5 block text-xs font-bold uppercase tracking-wide text-slate-300">Session Name</label>
-              <input id="edit-session-name" class="mt-2 w-full rounded-xl border border-transparent bg-[#3a4555] px-3 py-2.5 text-sm" bind:value={sessionName} />
+              <label for="edit-session-name" class="mt-5 block text-xs font-bold uppercase tracking-wide text-slate-500">Session Name</label>
+              <input id="edit-session-name" class="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={sessionName} />
 
-              <label for="edit-session-description" class="mt-4 block text-xs font-bold uppercase tracking-wide text-slate-300">Beschreibung</label>
-              <textarea id="edit-session-description" class="mt-2 min-h-[90px] w-full rounded-xl border border-transparent bg-[#3a4555] px-3 py-2.5 text-sm" bind:value={sessionDescription}></textarea>
+              <label for="edit-session-description" class="mt-4 block text-xs font-bold uppercase tracking-wide text-slate-500">Beschreibung</label>
+              <textarea id="edit-session-description" class="mt-2 min-h-[90px] w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={sessionDescription}></textarea>
 
-              <label for="edit-session-image" class="mt-4 block text-xs font-bold uppercase tracking-wide text-slate-300">Bild URL / Upload</label>
-              <input id="edit-session-image" class="mt-2 w-full rounded-xl border border-transparent bg-[#3a4555] px-3 py-2.5 text-sm" bind:value={sessionImageUrl} />
+              <label for="edit-session-image" class="mt-4 block text-xs font-bold uppercase tracking-wide text-slate-500">Bild URL / Upload</label>
+              <input id="edit-session-image" class="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={sessionImageUrl} />
               <input bind:this={editImageInputEl} class="hidden" type="file" accept="image/*" onchange={handleEditImageUpload} />
-              <button class="mt-2 w-full rounded-xl border border-white/30 bg-white/5 px-4 py-2.5 text-sm font-semibold hover:bg-white/10" onclick={() => editImageInputEl?.click()}>
+              <button class="mt-2 w-full rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-semibold hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={() => editImageInputEl?.click()}>
                 Bild hochladen
               </button>
 
-              <label for="session-token" class="mt-4 block text-xs font-bold uppercase tracking-wide text-slate-300">6-stelliger Token</label>
+              <label for="session-token" class="mt-4 block text-xs font-bold uppercase tracking-wide text-slate-500">6-stelliger Token</label>
               <div class="mt-2 flex gap-2">
-                <input id="session-token" class="w-full rounded-xl border border-transparent bg-[#3a4555] px-3 py-2.5 text-sm" bind:value={sessionCode} maxlength="6" />
-                <button class="rounded-xl border border-white/30 px-3 text-xs hover:bg-white/10" onclick={rotateSessionCode}>Neu</button>
+                <input id="session-token" class="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={sessionCode} maxlength="6" />
+                <button class="rounded-xl border border-slate-300 px-3 text-xs hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={rotateSessionCode}>Neu</button>
               </div>
 
               <div class="mt-4 grid grid-cols-2 gap-2">
-                <button class="rounded-xl border border-white/30 px-3 py-2 text-xs hover:bg-white/10" onclick={() => refreshAudioInputs(false)}>Reload devices</button>
-                <button class="rounded-xl border border-white/30 px-3 py-2 text-xs hover:bg-white/10" onclick={() => refreshAudioInputs(true)}>Enable mic</button>
+                <button class="rounded-xl border border-slate-300 px-3 py-2 text-xs hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={() => refreshAudioInputs(false)}>Reload devices</button>
+                <button class="rounded-xl border border-slate-300 px-3 py-2 text-xs hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={() => refreshAudioInputs(true)}>Enable mic</button>
               </div>
 
               <button class="mt-5 w-full rounded-xl bg-orange-500 px-4 py-3 text-sm font-semibold hover:bg-orange-600 disabled:opacity-60" onclick={startBroadcast} disabled={!selectedSessionId || !sessionCode || channels.length === 0}>
                 {isBroadcasting ? "Stop Broadcast" : "Start Broadcast"}
               </button>
-              <button class="mt-2 w-full rounded-xl border border-red-300/60 px-4 py-2 text-sm text-red-100 hover:bg-red-500/20" onclick={() => deleteSession(selectedSessionId)}>Session löschen</button>
-              <p class="mt-3 text-xs text-slate-200">{broadcasterStatus}</p>
+              <button class="mt-2 w-full rounded-xl border border-red-300 px-4 py-2 text-sm text-slate-900 hover:bg-red-50 dark:border-red-800 dark:text-slate-100 dark:hover:bg-red-900/20" onclick={() => deleteSession(selectedSessionId)}>Session löschen</button>
+              <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">{broadcasterStatus}</p>
             </aside>
 
             <section class="space-y-4">
@@ -1304,11 +1483,42 @@
                       ? "border-orange-400 bg-orange-50 dark:border-orange-500 dark:bg-orange-900/20"
                       : "border-slate-200 bg-slate-50 hover:border-slate-300 dark:border-slate-700 dark:bg-slate-800/60 dark:hover:border-slate-600"
                   }`}
-                  onclick={() => startListening(channel.id)}
+                  onclick={() => toggleChannelPlayback(channel.id)}
                 >
                   <div class="flex items-center justify-between">
                     <p class="text-lg font-bold">{channel.name}</p>
-                    <span class="grid h-12 w-12 place-items-center rounded-full bg-slate-200 text-xl text-slate-700 dark:bg-slate-700 dark:text-slate-100">▶</span>
+                    <span
+                      class={`grid h-12 w-12 place-items-center rounded-full text-xl ${
+                        activeListeningChannelId === channel.id && isListening
+                          ? "bg-orange-500 text-white"
+                          : "bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-100"
+                      }`}
+                      onclick={(event) => {
+                        event.stopPropagation();
+                        void toggleChannelPlayback(channel.id);
+                      }}
+                      role="button"
+                      tabindex="0"
+                      onkeydown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          void toggleChannelPlayback(channel.id);
+                        }
+                      }}
+                      aria-label={activeListeningChannelId === channel.id && isListening ? "Pause" : "Play"}
+                    >
+                      {#if activeListeningChannelId === channel.id && isListening}
+                        <svg viewBox="0 0 24 24" class="h-6 w-6" aria-hidden="true">
+                          <rect x="6.5" y="5" width="4.5" height="14" rx="1.5" fill="currentColor"></rect>
+                          <rect x="13" y="5" width="4.5" height="14" rx="1.5" fill="currentColor"></rect>
+                        </svg>
+                      {:else}
+                        <svg viewBox="0 0 24 24" class="h-6 w-6" aria-hidden="true">
+                          <path d="M8 5.5L18.5 12L8 18.5V5.5Z" fill="currentColor"></path>
+                        </svg>
+                      {/if}
+                    </span>
                   </div>
                   <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{channel.languageCode || "audio channel"}</p>
                   <p class={`mt-4 text-xs font-semibold ${channelIsLive(channel.id, "listener") ? "text-emerald-600 dark:text-emerald-400" : "text-slate-500 dark:text-slate-400"}`}>
