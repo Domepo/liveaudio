@@ -43,6 +43,24 @@ app.use(express.json());
 app.use(morgan("combined"));
 app.set("trust proxy", true);
 
+// Proxy-compat layer:
+// Some reverse proxies forward "/api/foo" as "/foo".
+// Remap known API roots so both variants work.
+app.use((req, _res, next) => {
+  if (req.path.startsWith("/api/") || req.path === "/api" || req.path === "/health") {
+    next();
+    return;
+  }
+
+  const remapRoots = ["/admin", "/sessions", "/join", "/network", "/public"];
+  const shouldRemap = remapRoots.some((root) => req.path === root || req.path.startsWith(`${root}/`));
+  if (shouldRemap) {
+    req.url = `/api${req.url}`;
+  }
+
+  next();
+});
+
 const joinLimiter = rateLimit({
   windowMs: 60_000,
   max: 30,
