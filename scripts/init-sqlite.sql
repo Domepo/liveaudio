@@ -79,3 +79,10 @@ CREATE TABLE IF NOT EXISTS "AccessLog" (
 
 CREATE INDEX IF NOT EXISTS "AccessLog_sessionId_createdAt_idx" ON "AccessLog"("sessionId", "createdAt");
 CREATE INDEX IF NOT EXISTS "AccessLog_ip_createdAt_idx" ON "AccessLog"("ip", "createdAt");
+
+CREATE TABLE IF NOT EXISTS "AppConfig" (
+  "key" TEXT PRIMARY KEY NOT NULL,
+  "value" TEXT NOT NULL,
+  "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

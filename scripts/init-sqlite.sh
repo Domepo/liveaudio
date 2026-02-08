@@ -29,3 +29,5 @@ fi
 
 sqlite3 "$DB_PATH" 'CREATE UNIQUE INDEX IF NOT EXISTS "Session_broadcastCode_key" ON "Session"("broadcastCode");'
 sqlite3 "$DB_PATH" 'REINDEX "Session_broadcastCode_key";'
+
+sqlite3 "$DB_PATH" 'CREATE TABLE IF NOT EXISTS "AppConfig" ("key" TEXT PRIMARY KEY NOT NULL, "value" TEXT NOT NULL, "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);'

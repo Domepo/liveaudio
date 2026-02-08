@@ -53,8 +53,12 @@
   let adminPassword = "";
   let adminAuthenticated = false;
   let adminStatus = "Bitte als Admin anmelden.";
+  let adminCurrentPassword = "";
+  let adminNewPassword = "";
+  let adminConfirmPassword = "";
 
-  let adminView: "list" | "detail" = "list";
+  let adminView: "dashboard" | "detail" = "dashboard";
+  let dashboardTab: "statistics" | "users" | "settings" | "sessions" = "statistics";
   let adminSessions: AdminSessionSummary[] = [];
   let selectedSessionId = "";
 
@@ -171,7 +175,7 @@
     isAdminRoute = pathname.startsWith("/admin");
 
     if (!isAdminRoute) {
-      adminView = "list";
+      adminView = "dashboard";
       selectedSessionId = "";
       return;
     }
@@ -183,18 +187,23 @@
       return;
     }
 
-    adminView = "list";
+    adminView = "dashboard";
     selectedSessionId = "";
   }
 
   function goToAdminList(): void {
     history.pushState({}, "", "/admin");
     syncRoute();
+    dashboardTab = "sessions";
+    if (adminAuthenticated) {
+      void loadAdminSessions();
+    }
   }
 
   function goToDashboard(): void {
     history.pushState({}, "", "/admin");
     syncRoute();
+    dashboardTab = "statistics";
     if (adminAuthenticated) {
       void loadAdminSessions();
     }
@@ -333,6 +342,26 @@
       adminStatus = "Abgemeldet.";
       await stopBroadcast();
       goToAdminList();
+    }
+  }
+
+  async function changeAdminPassword(): Promise<void> {
+    try {
+      await fetchJson<{ ok: boolean }>(`${apiUrl}/api/admin/change-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          currentPassword: adminCurrentPassword,
+          newPassword: adminNewPassword,
+          confirmPassword: adminConfirmPassword
+        })
+      });
+      adminCurrentPassword = "";
+      adminNewPassword = "";
+      adminConfirmPassword = "";
+      adminStatus = "Admin-Passwort wurde geändert.";
+    } catch (error) {
+      adminStatus = `Fehler: ${(error as Error).message}`;
     }
   }
 
@@ -959,11 +988,15 @@
   <header class="border-b border-slate-200/70 bg-white/70 backdrop-blur dark:border-slate-800 dark:bg-slate-900/70">
     <div class="mx-auto flex max-w-[1440px] items-center justify-between px-6 py-4">
       <div class="flex items-center gap-3">
-        <div class="grid h-9 w-9 place-items-center rounded-xl bg-slate-900 text-xs font-black text-white dark:bg-orange-500">LV1</div>
+        <div class="grid h-9 w-9 place-items-center overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
+          <img class="h-full w-full object-cover" src="/logo.svg" alt="Logo" />
+        </div>  
         <button class="text-sm font-semibold hover:text-orange-500" onclick={goToDashboard}>Dashboard</button>
         {#if isAdminRoute}
-          <div class="text-slate-400">›</div>
-          <button class="text-sm font-semibold hover:text-orange-500" onclick={goToAdminList}>My Sessions</button>
+          {#if adminView !== "dashboard" || dashboardTab === "sessions"}
+            <div class="text-slate-400">›</div>
+            <button class="text-sm font-semibold hover:text-orange-500" onclick={goToAdminList}>My Sessions</button>
+          {/if}
           {#if adminView === "detail"}
             <div class="text-slate-400">›</div>
             <div class="text-sm font-semibold text-orange-500">{sessionName || "Session"}</div>
@@ -987,69 +1020,129 @@
           <button class="mt-4 w-full rounded-xl bg-orange-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-orange-600" onclick={adminLogin}>Anmelden</button>
           <p class="mt-3 text-sm text-slate-600 dark:text-slate-300">{adminStatus}</p>
         </section>
-      {:else if adminView === "list"}
-        <section class="grid gap-6 lg:grid-cols-[420px_minmax(0,1fr)]">
-          <aside class="rounded-3xl border border-slate-200 bg-white/85 p-6 shadow-xl shadow-slate-200/40 dark:border-slate-800 dark:bg-slate-900/85 dark:shadow-black/30">
-            <h2 class="text-3xl font-black">My Sessions</h2>
-            <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Neue Session mit Bild und Beschreibung erstellen.</p>
-
-            <label for="create-session-name" class="mt-5 block text-xs font-bold uppercase tracking-wide text-slate-500">Session Name</label>
-            <input id="create-session-name" class="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={createSessionName} placeholder="Sunday Service" />
-
-            <label for="create-session-description" class="mt-4 block text-xs font-bold uppercase tracking-wide text-slate-500">Beschreibung</label>
-            <textarea id="create-session-description" class="mt-2 min-h-[110px] w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={createSessionDescription} placeholder="Predigt, Übersetzung, Hinweise..."></textarea>
-
-            <label for="create-session-image" class="mt-4 block text-xs font-bold uppercase tracking-wide text-slate-500">Titelbild (URL oder Upload)</label>
-            <input id="create-session-image" class="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={createSessionImageUrl} placeholder="https://..." />
-            <input bind:this={createImageInputEl} class="hidden" type="file" accept="image/*" onchange={handleCreateImageUpload} />
-            <button class="mt-2 w-full rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700" onclick={() => createImageInputEl?.click()}>
-              Bild hochladen
-            </button>
-
-            {#if createSessionImageUrl}
-              <img class="mt-3 h-32 w-full rounded-xl object-cover" src={createSessionImageUrl} alt="Session preview" />
-            {/if}
-
-            <button class="mt-6 w-full rounded-xl bg-orange-500 px-4 py-3 text-sm font-semibold text-white hover:bg-orange-600 disabled:opacity-60" onclick={createAdminSession} disabled={!createSessionName.trim()}>
-              Session erstellen
-            </button>
-            <button class="mt-2 w-full rounded-xl border border-slate-300 px-4 py-2 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={adminLogout}>Logout</button>
-            <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">{broadcasterStatus}</p>
+      {:else if adminView === "dashboard"}
+        <section class="grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
+          <aside class="rounded-3xl border border-slate-200 bg-white/85 p-4 shadow-xl shadow-slate-200/40 dark:border-slate-800 dark:bg-slate-900/85 dark:shadow-black/30">
+            <button class={`w-full rounded-xl px-4 py-2 text-left text-sm font-semibold ${dashboardTab === "sessions" ? "bg-orange-500 text-white" : "hover:bg-slate-50 dark:hover:bg-slate-800"}`} onclick={() => (dashboardTab = "sessions")}>Meine Sessions</button>
+            <button class={`mb-2 w-full rounded-xl px-4 py-2 text-left text-sm font-semibold ${dashboardTab === "statistics" ? "bg-orange-500 text-white" : "hover:bg-slate-100 dark:hover:bg-slate-800"}`} onclick={() => (dashboardTab = "statistics")}>Statistiken</button>
+            <button class={`mb-2 w-full rounded-xl px-4 py-2 text-left text-sm font-semibold ${dashboardTab === "users" ? "bg-orange-500 text-white" : "hover:bg-slate-100 dark:hover:bg-slate-800"}`} onclick={() => (dashboardTab = "users")}>Nutzerverwaltung</button>
+            <button class={`mb-2 w-full rounded-xl px-4 py-2 text-left text-sm font-semibold ${dashboardTab === "settings" ? "bg-orange-500 text-white" : "hover:bg-slate-100 dark:hover:bg-slate-800"}`} onclick={() => (dashboardTab = "settings")}>Einstellungen</button>
+            <button class="mt-4 w-full rounded-xl border border-slate-300 px-4 py-2 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={adminLogout}>Logout</button>
+            <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">{adminStatus}</p>
           </aside>
 
           <section>
-            <div class="mb-4 flex items-center justify-between">
-              <h3 class="text-2xl font-black">Bestehende Sessions</h3>
-              <button class="rounded-xl border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={loadAdminSessions}>Aktualisieren</button>
-            </div>
-
-            {#if adminSessions.length === 0}
-              <div class="rounded-2xl border border-dashed border-slate-300 bg-white/70 p-10 text-center text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-400">
-                Noch keine Sessions vorhanden.
+            {#if dashboardTab === "statistics"}
+              <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                  <p class="text-xs text-slate-500">Sessions</p>
+                  <p class="mt-1 text-3xl font-black">{adminSessions.length}</p>
+                </div>
+                <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                  <p class="text-xs text-slate-500">Aktive Sessions</p>
+                  <p class="mt-1 text-3xl font-black">{adminSessions.filter((s) => s.status === "ACTIVE").length}</p>
+                </div>
+                <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                  <p class="text-xs text-slate-500">Listener online</p>
+                  <p class="mt-1 text-3xl font-black">{adminSessions.reduce((sum, s) => sum + s.listenersConnected, 0)}</p>
+                </div>
+                <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                  <p class="text-xs text-slate-500">Live Producer</p>
+                  <p class="mt-1 text-3xl font-black">{adminSessions.reduce((sum, s) => sum + s.activeProducerChannels, 0)}</p>
+                </div>
               </div>
-            {:else}
-              <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                {#each adminSessions as session}
-                  <div class="group overflow-hidden rounded-2xl border border-slate-200 bg-white text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-xl dark:border-slate-800 dark:bg-slate-900">
-                    <div class="h-28 w-full bg-slate-200 dark:bg-slate-800">
-                      {#if session.imageUrl}
-                        <img class="h-full w-full object-cover" src={session.imageUrl} alt={session.name} />
-                      {/if}
-                    </div>
-                    <div class="p-4">
-                      <div class="flex items-start justify-between gap-2">
-                        <button class="truncate text-left text-lg font-bold group-hover:text-orange-500" onclick={() => goToAdminSession(session.id)}>{session.name}</button>
-                        <button class="rounded-lg border border-red-200 px-2 py-1 text-[11px] font-semibold text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/20" onclick={() => deleteSession(session.id)}>Löschen</button>
-                      </div>
-                      <p class="mt-1 line-clamp-2 text-xs text-slate-500 dark:text-slate-400">{session.description || "Keine Beschreibung"}</p>
-                      <div class="mt-3 flex flex-wrap gap-2 text-[11px] font-semibold">
-                        <span class="rounded-full bg-slate-100 px-2.5 py-1 dark:bg-slate-800">{session.channelsCount} Channels</span>
-                        <span class="rounded-full bg-emerald-100 px-2.5 py-1 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">{session.listenersConnected} Listener</span>
-                        <span class="rounded-full bg-orange-100 px-2.5 py-1 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300">{session.activeProducerChannels} Live</span>
-                      </div>
-                    </div>
+              <button class="mt-4 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={loadAdminSessions}>Aktualisieren</button>
+            {:else if dashboardTab === "users"}
+              <div class="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+                <h3 class="text-xl font-black">Nutzerverwaltung</h3>
+                <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Admin-Passwort ändern</p>
+
+                <label for="admin-current-password" class="mt-4 block text-[11px] font-bold uppercase tracking-wide text-slate-500">Aktuelles Passwort</label>
+                <input id="admin-current-password" type="password" class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900" bind:value={adminCurrentPassword} />
+
+                <label for="admin-new-password" class="mt-3 block text-[11px] font-bold uppercase tracking-wide text-slate-500">Neues Passwort</label>
+                <input id="admin-new-password" type="password" class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900" bind:value={adminNewPassword} />
+
+                <label for="admin-confirm-password" class="mt-3 block text-[11px] font-bold uppercase tracking-wide text-slate-500">Bestätigung</label>
+                <input id="admin-confirm-password" type="password" class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900" bind:value={adminConfirmPassword} />
+
+                <button class="mt-4 rounded-xl bg-orange-500 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-600 disabled:opacity-50" onclick={changeAdminPassword} disabled={!adminCurrentPassword || !adminNewPassword || adminNewPassword !== adminConfirmPassword}>
+                  Passwort speichern
+                </button>
+              </div>
+            {:else if dashboardTab === "sessions"}
+              <section class="grid gap-6 lg:grid-cols-[420px_minmax(0,1fr)]">
+                <aside class="rounded-3xl border border-slate-200 bg-white/85 p-6 shadow-xl shadow-slate-200/40 dark:border-slate-800 dark:bg-slate-900/85 dark:shadow-black/30">
+                  <h2 class="text-3xl font-black">My Sessions</h2>
+                  <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Neue Session mit Bild und Beschreibung erstellen.</p>
+
+                  <label for="create-session-name" class="mt-5 block text-xs font-bold uppercase tracking-wide text-slate-500">Session Name</label>
+                  <input id="create-session-name" class="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={createSessionName} placeholder="Sunday Service" />
+
+                  <label for="create-session-description" class="mt-4 block text-xs font-bold uppercase tracking-wide text-slate-500">Beschreibung</label>
+                  <textarea id="create-session-description" class="mt-2 min-h-[110px] w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={createSessionDescription} placeholder="Predigt, Übersetzung, Hinweise..."></textarea>
+
+                  <label for="create-session-image" class="mt-4 block text-xs font-bold uppercase tracking-wide text-slate-500">Titelbild (URL oder Upload)</label>
+                  <input id="create-session-image" class="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={createSessionImageUrl} placeholder="https://..." />
+                  <input bind:this={createImageInputEl} class="hidden" type="file" accept="image/*" onchange={handleCreateImageUpload} />
+                  <button class="mt-2 w-full rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700" onclick={() => createImageInputEl?.click()}>
+                    Bild hochladen
+                  </button>
+
+                  {#if createSessionImageUrl}
+                    <img class="mt-3 h-32 w-full rounded-xl object-cover" src={createSessionImageUrl} alt="Session preview" />
+                  {/if}
+
+                  <button class="mt-6 w-full rounded-xl bg-orange-500 px-4 py-3 text-sm font-semibold text-white hover:bg-orange-600 disabled:opacity-60" onclick={createAdminSession} disabled={!createSessionName.trim()}>
+                    Session erstellen
+                  </button>
+                  <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">{broadcasterStatus}</p>
+                </aside>
+
+                <section>
+                  <div class="mb-4 flex items-center justify-between">
+                    <h3 class="text-2xl font-black">Bestehende Sessions</h3>
+                    <button class="rounded-xl border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={loadAdminSessions}>Aktualisieren</button>
                   </div>
-                {/each}
+
+                  {#if adminSessions.length === 0}
+                    <div class="rounded-2xl border border-dashed border-slate-300 bg-white/70 p-10 text-center text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-400">
+                      Noch keine Sessions vorhanden.
+                    </div>
+                  {:else}
+                    <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-2">
+                      {#each adminSessions as session}
+                        <div class="group overflow-hidden rounded-2xl border border-slate-200 bg-white text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-xl dark:border-slate-800 dark:bg-slate-900">
+                          <div class="h-28 w-full bg-slate-200 dark:bg-slate-800">
+                            {#if session.imageUrl}
+                              <img class="h-full w-full object-cover" src={session.imageUrl} alt={session.name} />
+                            {/if}
+                          </div>
+                          <div class="p-4">
+                            <div class="flex items-start justify-between gap-2">
+                              <button class="truncate text-left text-lg font-bold group-hover:text-orange-500" onclick={() => goToAdminSession(session.id)}>{session.name}</button>
+                              <button class="rounded-lg border border-red-200 px-2 py-1 text-[11px] font-semibold text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/20" onclick={() => deleteSession(session.id)}>Löschen</button>
+                            </div>
+                            <p class="mt-1 line-clamp-2 text-xs text-slate-500 dark:text-slate-400">{session.description || "Keine Beschreibung"}</p>
+                            <div class="mt-3 flex flex-wrap gap-2 text-[11px] font-semibold">
+                              <span class="rounded-full bg-slate-100 px-2.5 py-1 dark:bg-slate-800">{session.channelsCount} Channels</span>
+                              <span class="rounded-full bg-emerald-100 px-2.5 py-1 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">{session.listenersConnected} Listener</span>
+                              <span class="rounded-full bg-orange-100 px-2.5 py-1 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300">{session.activeProducerChannels} Live</span>
+                            </div>
+                          </div>
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                </section>
+              </section>
+            {:else}
+              <div class="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+                <h3 class="text-xl font-black">Einstellungen</h3>
+                <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Hier kannst du globale Dashboard-Einstellungen konfigurieren.</p>
+                <div class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm dark:border-slate-700 dark:bg-slate-800">
+                  Aktives Logo: <code>/logo.svg</code>
+                </div>
               </div>
             {/if}
           </section>

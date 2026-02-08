@@ -29,6 +29,7 @@ const API_HOST = process.env.API_HOST ?? "0.0.0.0";
 const JWT_SECRET = process.env.JWT_SECRET ?? "dev-secret";
 const ADMIN_SESSION_COOKIE = "admin_session";
 const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH ?? "$2a$12$CBpEnaQBlvvAY/Z.kqa/JOCAawr.Hdn48.x44Vae4DuyEklXWm0ea"; // "test"
+const ADMIN_PASSWORD_CONFIG_KEY = "ADMIN_PASSWORD_HASH";
 const MEDIA_BASE_URL = process.env.MEDIA_BASE_URL ?? "http://localhost:4000";
 
 app.use(
@@ -189,6 +190,16 @@ const createSessionSchema = z.object({
 });
 const createChannelSchema = z.object({ name: z.string().min(2).max(50), languageCode: z.string().max(8).optional() });
 const adminLoginSchema = z.object({ password: z.string().min(1).max(200) });
+const changeAdminPasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1).max(200),
+    newPassword: z.string().min(6).max(200),
+    confirmPassword: z.string().min(6).max(200)
+  })
+  .refine((input) => input.newPassword === input.confirmPassword, {
+    message: "Passwords do not match",
+    path: ["confirmPassword"]
+  });
 const createJoinLinkSchema = z.object({
   joinBaseUrl: z.string().url().optional(),
   token: z.string().regex(/^\d{6}$/)
@@ -211,6 +222,14 @@ function removeSocketFromRoleMap(map: Map<string, Set<string>>, sessionId: strin
   if (!set) return;
   set.delete(socketId);
   if (set.size === 0) map.delete(sessionId);
+}
+
+async function getEffectiveAdminPasswordHash(): Promise<string> {
+  const config = await prisma.appConfig.findUnique({
+    where: { key: ADMIN_PASSWORD_CONFIG_KEY },
+    select: { value: true }
+  });
+  return config?.value ?? ADMIN_PASSWORD_HASH;
 }
 
 async function fetchSessionStats(sessionId: string): Promise<{
@@ -336,7 +355,8 @@ app.post("/api/admin/login", adminLoginLimiter, async (req, res) => {
     return res.status(400).json({ error: "Invalid payload" });
   }
 
-  const ok = await bcrypt.compare(parsed.data.password, ADMIN_PASSWORD_HASH);
+  const effectiveHash = await getEffectiveAdminPasswordHash();
+  const ok = await bcrypt.compare(parsed.data.password, effectiveHash);
   if (!ok) {
     return res.status(401).json({ error: "Invalid admin password" });
   }
@@ -353,6 +373,28 @@ app.post("/api/admin/logout", (_req, res) => {
 
 app.get("/api/admin/me", requireAdmin, (_req, res) => {
   return res.json({ authenticated: true });
+});
+
+app.post("/api/admin/change-password", requireAdmin, async (req, res) => {
+  const parsed = changeAdminPasswordSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid payload" });
+  }
+
+  const effectiveHash = await getEffectiveAdminPasswordHash();
+  const currentOk = await bcrypt.compare(parsed.data.currentPassword, effectiveHash);
+  if (!currentOk) {
+    return res.status(401).json({ error: "Current password is invalid" });
+  }
+
+  const newHash = await bcrypt.hash(parsed.data.newPassword, 12);
+  await prisma.appConfig.upsert({
+    where: { key: ADMIN_PASSWORD_CONFIG_KEY },
+    create: { key: ADMIN_PASSWORD_CONFIG_KEY, value: newHash },
+    update: { value: newHash }
+  });
+
+  return res.json({ ok: true });
 });
 
 app.get("/api/admin/sessions", requireAdmin, async (_req, res) => {
