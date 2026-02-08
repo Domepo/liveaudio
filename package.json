@@ -1,0 +1,25 @@
+{
+  "name": "livevoice-alt",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run prisma:generate && npm run db:init && concurrently -n MEDIA,API,WEB -c blue,green,magenta \"npm run dev:media\" \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:docker": "docker compose up --build",
+    "dev:api": "npm run dev -w @livevoice/api",
+    "dev:media": "npm run dev -w @livevoice/media",
+    "dev:web": "npm run dev -w @livevoice/web",
+    "build": "npm run build -ws",
+    "db:init": "sqlite3 prisma/dev.db < scripts/init-sqlite.sql",
+    "prisma:generate": "npx prisma generate",
+    "prisma:push": "npx prisma db push --schema=prisma/schema.prisma",
+    "prisma:generate:postgres": "npx prisma generate --schema=prisma/schema.postgres.prisma",
+    "prisma:push:postgres": "npx prisma db push --schema=prisma/schema.postgres.prisma",
+    "prisma:migrate": "npx prisma migrate dev"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

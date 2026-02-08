@@ -1,0 +1,70 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: livevoice-postgres
+    environment:
+      POSTGRES_DB: livevoice
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d livevoice"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  media:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.media
+    container_name: livevoice-media
+    environment:
+      MEDIA_PORT: 4000
+      MEDIA_LISTEN_IP: 0.0.0.0
+      MEDIA_ANNOUNCED_IP: 127.0.0.1
+      RTC_MIN_PORT: 40000
+      RTC_MAX_PORT: 40100
+    ports:
+      - "4000:4000"
+      - "40000-40100:40000-40100/udp"
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: livevoice-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      media:
+        condition: service_started
+    environment:
+      API_PORT: 3000
+      API_HOST: 0.0.0.0
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/livevoice?schema=public
+      JWT_SECRET: change-me
+      MEDIA_BASE_URL: http://media:4000
+      PUBLIC_JOIN_URL: http://localhost:5173
+      JOIN_TOKEN_TTL_MINUTES: 15
+      PIN_MAX_ATTEMPTS: 6
+    ports:
+      - "3000:3000"
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    container_name: livevoice-web
+    depends_on:
+      - api
+    environment:
+      VITE_API_URL: http://localhost:3000
+      VITE_WS_URL: http://localhost:3000
+    ports:
+      - "5173:5173"
+
+volumes:
+  pgdata:

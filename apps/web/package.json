@@ -1,0 +1,24 @@
+{
+  "name": "@livevoice/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "mediasoup-client": "^3.9.7",
+    "qrcode": "^1.5.4",
+    "socket.io-client": "^4.8.1",
+    "svelte": "^5.16.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "autoprefixer": "^10.4.24",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.5"
+  }
+}
