@@ -77,25 +77,32 @@ function generateSessionCode(): string {
 }
 
 async function generateUniqueSessionCode(excludeSessionId?: string): Promise<string> {
-  const sessions = await prisma.session.findMany({
-    where: { broadcastCodeHash: { not: null } },
+  const legacyHashSessions = await prisma.session.findMany({
+    where: { broadcastCode: null, broadcastCodeHash: { not: null } },
     select: { id: true, broadcastCodeHash: true }
   });
 
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const candidate = generateSessionCode();
-    let collision = false;
+    const existing = await prisma.session.findFirst({
+      where: {
+        broadcastCode: candidate,
+        ...(excludeSessionId ? { id: { not: excludeSessionId } } : {})
+      },
+      select: { id: true }
+    });
+    if (existing) continue;
 
-    for (const session of sessions) {
-      if (excludeSessionId && session.id === excludeSessionId) continue;
-      if (!session.broadcastCodeHash) continue;
-      if (await bcrypt.compare(candidate, session.broadcastCodeHash)) {
-        collision = true;
+    let collidesWithLegacyHash = false;
+    for (const legacy of legacyHashSessions) {
+      if (excludeSessionId && legacy.id === excludeSessionId) continue;
+      if (!legacy.broadcastCodeHash) continue;
+      if (await bcrypt.compare(candidate, legacy.broadcastCodeHash)) {
+        collidesWithLegacyHash = true;
         break;
       }
     }
-
-    if (!collision) return candidate;
+    if (!collidesWithLegacyHash) return candidate;
   }
 
   throw new Error("Could not generate a unique 6-digit token");
@@ -255,15 +262,37 @@ async function fetchLiveChannelIds(sessionId: string): Promise<string[]> {
 }
 
 async function findActiveSessionByCode(code: string) {
-  const sessions = await prisma.session.findMany({
-    where: { status: "ACTIVE", broadcastCodeHash: { not: null } },
-    select: { id: true, name: true, description: true, imageUrl: true, status: true, broadcastCodeHash: true }
+  const direct = await prisma.session.findFirst({
+    where: { status: "ACTIVE", broadcastCode: code },
+    select: {
+      id: true,
+      name: true,
+      description: true,
+      imageUrl: true,
+      status: true,
+      broadcastCode: true,
+      broadcastCodeHash: true
+    }
   });
+  if (direct) return direct;
 
-  for (const session of sessions) {
+  const legacy = await prisma.session.findMany({
+    where: { status: "ACTIVE", broadcastCode: null, broadcastCodeHash: { not: null } },
+    select: {
+      id: true,
+      name: true,
+      description: true,
+      imageUrl: true,
+      status: true,
+      broadcastCode: true,
+      broadcastCodeHash: true
+    }
+  });
+  for (const session of legacy) {
     if (!session.broadcastCodeHash) continue;
-    const ok = await bcrypt.compare(code, session.broadcastCodeHash);
-    if (ok) return session;
+    if (await bcrypt.compare(code, session.broadcastCodeHash)) {
+      return session;
+    }
   }
   return null;
 }
@@ -344,6 +373,7 @@ app.get("/api/admin/sessions", requireAdmin, async (_req, res) => {
         name: session.name,
         description: session.description,
         imageUrl: session.imageUrl,
+        broadcastCode: session.broadcastCode,
         status: session.status,
         createdAt: session.createdAt,
         startedAt: session.startedAt,
@@ -371,6 +401,7 @@ app.post("/api/admin/sessions", requireAdmin, async (req, res) => {
       name: parsed.data.name,
       description: parsed.data.description,
       imageUrl: parsed.data.imageUrl,
+      broadcastCode,
       broadcastCodeHash
     }
   });
@@ -388,9 +419,18 @@ app.post("/api/admin/sessions", requireAdmin, async (req, res) => {
 
 app.get("/api/admin/sessions/:sessionId", requireAdmin, async (req, res) => {
   const sessionId = String(req.params.sessionId);
-  const session = await prisma.session.findUnique({ where: { id: sessionId } });
+  let session = await prisma.session.findUnique({ where: { id: sessionId } });
   if (!session) {
     return res.status(404).json({ error: "Session not found" });
+  }
+
+  if (!session.broadcastCode && session.status === "ACTIVE") {
+    const broadcastCode = await generateUniqueSessionCode(sessionId);
+    const broadcastCodeHash = await bcrypt.hash(broadcastCode, 10);
+    session = await prisma.session.update({
+      where: { id: sessionId },
+      data: { broadcastCode, broadcastCodeHash }
+    });
   }
 
   const [channels, stats, liveChannelIds] = await Promise.all([
@@ -408,6 +448,7 @@ app.get("/api/admin/sessions/:sessionId", requireAdmin, async (req, res) => {
       name: session.name,
       description: session.description,
       imageUrl: session.imageUrl,
+      broadcastCode: session.broadcastCode,
       status: session.status,
       createdAt: session.createdAt
     },
@@ -450,7 +491,7 @@ app.post("/api/admin/sessions/:sessionId/rotate-code", requireAdmin, async (req,
   const broadcastCodeHash = await bcrypt.hash(broadcastCode, 10);
   await prisma.session.update({
     where: { id: sessionId },
-    data: { broadcastCodeHash }
+    data: { broadcastCode, broadcastCodeHash }
   });
 
   return res.json({ broadcastCode });
@@ -490,6 +531,7 @@ app.post("/api/sessions", requireAdmin, async (req, res) => {
       name: parsed.data.name,
       description: parsed.data.description,
       imageUrl: parsed.data.imageUrl,
+      broadcastCode,
       broadcastCodeHash
     }
   });
@@ -528,6 +570,20 @@ app.get("/api/sessions/:sessionId/channels", async (req, res) => {
     orderBy: { createdAt: "asc" }
   });
   return res.json(channels);
+});
+
+app.delete("/api/sessions/:sessionId/channels/:channelId", requireAdmin, async (req, res) => {
+  const sessionId = String(req.params.sessionId);
+  const channelId = String(req.params.channelId);
+
+  const channel = await prisma.channel.findUnique({ where: { id: channelId } });
+  if (!channel || channel.sessionId !== sessionId) {
+    return res.status(404).json({ error: "Channel not found" });
+  }
+
+  await prisma.channel.delete({ where: { id: channelId } });
+  io.to(`session:${sessionId}`).emit("session:channelsUpdated", { sessionId });
+  return res.json({ ok: true });
 });
 
 app.post("/api/sessions/:sessionId/join-link", requireAdmin, async (req, res) => {
@@ -624,12 +680,14 @@ io.use(async (socket, next) => {
     }
 
     const session = await prisma.session.findUnique({ where: { id: sessionId } });
-    if (!session || session.status !== "ACTIVE" || !session.broadcastCodeHash) {
+    if (!session || session.status !== "ACTIVE") {
       next(new Error("Session not found"));
       return;
     }
 
-    const validCode = await bcrypt.compare(sessionCode, session.broadcastCodeHash);
+    const validCode =
+      (typeof session.broadcastCode === "string" && session.broadcastCode === sessionCode) ||
+      (typeof session.broadcastCodeHash === "string" && (await bcrypt.compare(sessionCode, session.broadcastCodeHash)));
     if (!validCode) {
       next(new Error("Invalid code"));
       return;

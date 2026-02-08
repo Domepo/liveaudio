@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS "Session" (
   "name" TEXT NOT NULL,
   "description" TEXT,
   "imageUrl" TEXT,
+  "broadcastCode" TEXT,
   "broadcastCodeHash" TEXT,
   "status" TEXT NOT NULL DEFAULT 'ACTIVE',
   "createdByUserId" TEXT,
@@ -24,6 +25,7 @@ CREATE TABLE IF NOT EXISTS "Session" (
 );
 
 CREATE INDEX IF NOT EXISTS "Session_status_createdAt_idx" ON "Session"("status", "createdAt");
+CREATE UNIQUE INDEX IF NOT EXISTS "Session_broadcastCode_key" ON "Session"("broadcastCode");
 
 CREATE TABLE IF NOT EXISTS "Channel" (
   "id" TEXT PRIMARY KEY NOT NULL,

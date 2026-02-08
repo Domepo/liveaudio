@@ -82,6 +82,7 @@
   let channelLanguage = "de";
   let channels: Channel[] = [];
   let adminLiveChannelIds: string[] = [];
+  let channelDbLevels: Record<string, number> = {};
   let channelInputAssignments: Record<string, string> = {};
   let audioInputs: AudioInput[] = [];
 
@@ -104,8 +105,14 @@
   let broadcasterSocket: Socket | null = null;
   let listenerSocket: Socket | null = null;
   let broadcasterMicStreams: MediaStream[] = [];
+  let meterAudioContext: AudioContext | null = null;
+  let meterAnimationId: number | null = null;
+  const channelAnalyzers = new Map<string, { analyser: AnalyserNode; dataArray: Uint8Array; source: MediaStreamAudioSourceNode }>();
   let createImageInputEl: HTMLInputElement;
   let editImageInputEl: HTMLInputElement;
+  let autoSaveSessionTimer: ReturnType<typeof setTimeout> | null = null;
+  let isHydratingSessionMeta = false;
+  let lastSavedSessionMeta = { name: "", description: "", imageUrl: "" };
 
   function shortId(value: string): string {
     if (!value) return "-";
@@ -185,6 +192,14 @@
     syncRoute();
   }
 
+  function goToDashboard(): void {
+    history.pushState({}, "", "/admin");
+    syncRoute();
+    if (adminAuthenticated) {
+      void loadAdminSessions();
+    }
+  }
+
   function goToAdminSession(sessionId: string): void {
     history.pushState({}, "", `/admin/sessions/${encodeURIComponent(sessionId)}`);
     syncRoute();
@@ -206,6 +221,73 @@
 
   function channelIsLive(channelId: string, mode: "admin" | "listener"): boolean {
     return (mode === "admin" ? adminLiveChannelIds : listenerLiveChannelIds).includes(channelId);
+  }
+
+  function channelDbToPercent(db: number): number {
+    const minDb = -60;
+    const maxDb = 0;
+    const clamped = Math.max(minDb, Math.min(maxDb, db));
+    return ((clamped - minDb) / (maxDb - minDb)) * 100;
+  }
+
+  function meterBarClass(db: number): string {
+    if (db > -12) return "bg-gradient-to-r from-amber-400 to-emerald-500";
+    if (db > -24) return "bg-gradient-to-r from-orange-400 to-lime-500";
+    return "bg-gradient-to-r from-rose-500 to-amber-400";
+  }
+
+  function stopLevelMeters(): void {
+    if (meterAnimationId !== null) {
+      cancelAnimationFrame(meterAnimationId);
+      meterAnimationId = null;
+    }
+    for (const meter of channelAnalyzers.values()) {
+      meter.source.disconnect();
+    }
+    channelAnalyzers.clear();
+    if (meterAudioContext) {
+      void meterAudioContext.close();
+      meterAudioContext = null;
+    }
+    channelDbLevels = {};
+  }
+
+  function startLevelMeterLoop(): void {
+    if (meterAnimationId !== null) return;
+    const update = () => {
+      const nextLevels: Record<string, number> = {};
+      for (const [channelId, meter] of channelAnalyzers.entries()) {
+        meter.analyser.getByteTimeDomainData(meter.dataArray);
+        let sum = 0;
+        for (const value of meter.dataArray) {
+          const normalized = (value - 128) / 128;
+          sum += normalized * normalized;
+        }
+        const rms = Math.sqrt(sum / meter.dataArray.length);
+        const db = rms > 0 ? 20 * Math.log10(rms) : -60;
+        nextLevels[channelId] = Number(Math.max(-60, Math.min(0, db)).toFixed(1));
+      }
+      channelDbLevels = nextLevels;
+      meterAnimationId = requestAnimationFrame(update);
+    };
+    meterAnimationId = requestAnimationFrame(update);
+  }
+
+  async function attachLevelMeter(channelId: string, stream: MediaStream): Promise<void> {
+    if (!meterAudioContext) {
+      meterAudioContext = new AudioContext();
+    }
+    if (meterAudioContext.state === "suspended") {
+      await meterAudioContext.resume();
+    }
+
+    const source = meterAudioContext.createMediaStreamSource(stream);
+    const analyser = meterAudioContext.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.75;
+    source.connect(analyser);
+    channelAnalyzers.set(channelId, { analyser, dataArray: new Uint8Array(analyser.fftSize), source });
+    startLevelMeterLoop();
   }
 
   async function refreshAudioInputs(requestPermission = false): Promise<void> {
@@ -272,21 +354,30 @@
     if (!selectedSessionId) return;
 
     const data = await fetchJson<{
-      session: { id: string; name: string; description?: string | null; imageUrl?: string | null };
+      session: { id: string; name: string; description?: string | null; imageUrl?: string | null; broadcastCode?: string | null };
       channels: Channel[];
       stats: SessionStats;
       liveChannelIds: string[];
     }>(`${apiUrl}/api/admin/sessions/${selectedSessionId}`);
 
+    isHydratingSessionMeta = true;
     sessionName = data.session.name;
     sessionDescription = data.session.description ?? "";
     sessionImageUrl = data.session.imageUrl ?? "";
+    sessionCode = data.session.broadcastCode ?? "";
+    lastSavedSessionMeta = {
+      name: sessionName,
+      description: sessionDescription,
+      imageUrl: sessionImageUrl
+    };
     channels = data.channels;
     adminLiveChannelIds = data.liveChannelIds ?? [];
     syncChannelAssignments(data.channels);
     sessionStats = data.stats;
     joinUrl = "";
     joinQrDataUrl = "";
+    channelDbLevels = {};
+    isHydratingSessionMeta = false;
   }
 
   async function deleteSession(sessionId: string): Promise<void> {
@@ -328,8 +419,15 @@
     }
   }
 
-  async function saveSessionMeta(): Promise<void> {
+  async function saveSessionMeta(silent = false): Promise<void> {
     if (!selectedSessionId) return;
+    if (
+      sessionName === lastSavedSessionMeta.name &&
+      sessionDescription === lastSavedSessionMeta.description &&
+      sessionImageUrl === lastSavedSessionMeta.imageUrl
+    ) {
+      return;
+    }
     try {
       await fetchJson(`${apiUrl}/api/admin/sessions/${selectedSessionId}`, {
         method: "PATCH",
@@ -340,11 +438,28 @@
           imageUrl: sessionImageUrl || null
         })
       });
+      lastSavedSessionMeta = {
+        name: sessionName,
+        description: sessionDescription,
+        imageUrl: sessionImageUrl
+      };
       await loadAdminSessions();
-      setStatus("broadcaster", "Session gespeichert.");
+      if (!silent) {
+        setStatus("broadcaster", "Session gespeichert.");
+      }
     } catch (error) {
       setStatus("broadcaster", `Fehler: ${(error as Error).message}`);
     }
+  }
+
+  function scheduleAutoSaveSessionMeta(): void {
+    if (!selectedSessionId || isHydratingSessionMeta) return;
+    if (autoSaveSessionTimer) {
+      clearTimeout(autoSaveSessionTimer);
+    }
+    autoSaveSessionTimer = setTimeout(() => {
+      void saveSessionMeta(true);
+    }, 550);
   }
 
   async function rotateSessionCode(): Promise<void> {
@@ -391,6 +506,28 @@
     }
   }
 
+  async function deleteChannel(channelId: string): Promise<void> {
+    if (!selectedSessionId) return;
+    const confirmDelete = window.confirm("Channel wirklich löschen?");
+    if (!confirmDelete) return;
+
+    try {
+      await fetchJson<{ ok: boolean }>(`${apiUrl}/api/sessions/${selectedSessionId}/channels/${channelId}`, {
+        method: "DELETE"
+      });
+      channels = channels.filter((channel) => channel.id !== channelId);
+      adminLiveChannelIds = adminLiveChannelIds.filter((id) => id !== channelId);
+      delete channelInputAssignments[channelId];
+      delete channelDbLevels[channelId];
+      channelInputAssignments = { ...channelInputAssignments };
+      channelDbLevels = { ...channelDbLevels };
+      await refreshSessionStats();
+      setStatus("broadcaster", "Channel gelöscht.");
+    } catch (error) {
+      setStatus("broadcaster", `Fehler: ${(error as Error).message}`);
+    }
+  }
+
   async function generateJoin(): Promise<void> {
     if (!selectedSessionId) {
       setStatus("broadcaster", "Bitte zuerst Session wählen.");
@@ -428,11 +565,15 @@
       setStatus("broadcaster", "Session und 6-stelliger Token erforderlich.");
       return;
     }
+    if (isBroadcasting) {
+      await stopBroadcast();
+      return;
+    }
     if (channels.length === 0) {
       setStatus("broadcaster", "Bitte mindestens einen Channel anlegen.");
       return;
     }
-    if (isBroadcasting) await stopBroadcast();
+    stopLevelMeters();
 
     try {
       if (audioInputs.length === 0) {
@@ -473,6 +614,7 @@
 
           const stream = await navigator.mediaDevices.getUserMedia({ audio: constraints, video: false });
           broadcasterMicStreams.push(stream);
+          await attachLevelMeter(channel.id, stream);
           const track = stream.getAudioTracks()[0];
 
           const transportData = await emitAck<{
@@ -546,6 +688,7 @@
       stream.getTracks().forEach((track) => track.stop());
     }
     broadcasterMicStreams = [];
+    stopLevelMeters();
 
     isBroadcasting = false;
     setStatus("broadcaster", "Broadcast gestoppt");
@@ -571,6 +714,13 @@
     } catch (error) {
       setStatus("listener", `Fehler: ${(error as Error).message}`);
     }
+  }
+
+  async function enterWithToken(): Promise<void> {
+    await validateJoin();
+    if (!listenerSessionId) return;
+    isQuickJoinMode = true;
+    history.replaceState({}, "", `/?token=${encodeURIComponent(listenerCode.trim())}`);
   }
 
   async function refreshListenerLiveState(): Promise<void> {
@@ -791,16 +941,26 @@
     return () => {
       window.removeEventListener("popstate", syncRoute);
       clearInterval(statsInterval);
+      if (autoSaveSessionTimer) {
+        clearTimeout(autoSaveSessionTimer);
+      }
     };
   });
+
+  $: if (isAdminRoute && adminAuthenticated && adminView === "detail" && selectedSessionId && !isHydratingSessionMeta) {
+    sessionName;
+    sessionDescription;
+    sessionImageUrl;
+    scheduleAutoSaveSessionMeta();
+  }
 </script>
 
 <main class="min-h-screen bg-[radial-gradient(circle_at_top,#f8fafc_0%,#eef2ff_45%,#e2e8f0_100%)] text-slate-900 dark:bg-[radial-gradient(circle_at_top,#0f172a_0%,#020617_70%)] dark:text-slate-100">
   <header class="border-b border-slate-200/70 bg-white/70 backdrop-blur dark:border-slate-800 dark:bg-slate-900/70">
     <div class="mx-auto flex max-w-[1440px] items-center justify-between px-6 py-4">
       <div class="flex items-center gap-3">
-        <div class="grid h-9 w-9 place-items-center rounded-xl bg-slate-900 text-xs font-black text-white dark:bg-orange-500">LV</div>
-        <div class="text-sm font-semibold">My Events</div>
+        <div class="grid h-9 w-9 place-items-center rounded-xl bg-slate-900 text-xs font-black text-white dark:bg-orange-500">LV1</div>
+        <button class="text-sm font-semibold hover:text-orange-500" onclick={goToDashboard}>Dashboard</button>
         {#if isAdminRoute}
           <div class="text-slate-400">›</div>
           <button class="text-sm font-semibold hover:text-orange-500" onclick={goToAdminList}>My Sessions</button>
@@ -937,10 +1097,8 @@
               </div>
 
               <button class="mt-5 w-full rounded-xl bg-orange-500 px-4 py-3 text-sm font-semibold hover:bg-orange-600 disabled:opacity-60" onclick={startBroadcast} disabled={!selectedSessionId || !sessionCode || channels.length === 0}>
-                {isBroadcasting ? "Broadcasting..." : "Start Broadcast"}
+                {isBroadcasting ? "Stop Broadcast" : "Start Broadcast"}
               </button>
-              <button class="mt-2 w-full rounded-xl border border-white/30 px-4 py-2 text-sm hover:bg-white/10 disabled:opacity-60" onclick={stopBroadcast} disabled={!isBroadcasting}>Stop</button>
-              <button class="mt-2 w-full rounded-xl border border-white/30 px-4 py-2 text-sm hover:bg-white/10" onclick={saveSessionMeta}>Session speichern</button>
               <button class="mt-2 w-full rounded-xl border border-red-300/60 px-4 py-2 text-sm text-red-100 hover:bg-red-500/20" onclick={() => deleteSession(selectedSessionId)}>Session löschen</button>
               <p class="mt-3 text-xs text-slate-200">{broadcasterStatus}</p>
             </aside>
@@ -987,6 +1145,21 @@
                               <option value={input.deviceId}>{input.label}</option>
                             {/each}
                           </select>
+                          <button class="rounded-xl border border-red-200 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/20" onclick={() => deleteChannel(channel.id)}>
+                            Delete
+                          </button>
+                        </div>
+                        <div class="mt-3">
+                          <div class="mb-1 flex items-center justify-between text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                            <span>Input Level</span>
+                            <span>{channelDbLevels[channel.id] ?? -60} dB</span>
+                          </div>
+                          <div class="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                            <div
+                              class={`h-full transition-[width] duration-100 ${meterBarClass(channelDbLevels[channel.id] ?? -60)}`}
+                              style={`width: ${channelDbToPercent(channelDbLevels[channel.id] ?? -60)}%`}
+                            ></div>
+                          </div>
                         </div>
                       </div>
                     {/each}
@@ -1042,7 +1215,7 @@
                 >
                   <div class="flex items-center justify-between">
                     <p class="text-lg font-bold">{channel.name}</p>
-                    <span class="grid h-8 w-8 place-items-center rounded-full bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-100">▶</span>
+                    <span class="grid h-12 w-12 place-items-center rounded-full bg-slate-200 text-xl text-slate-700 dark:bg-slate-700 dark:text-slate-100">▶</span>
                   </div>
                   <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{channel.languageCode || "audio channel"}</p>
                   <p class={`mt-4 text-xs font-semibold ${channelIsLive(channel.id, "listener") ? "text-emerald-600 dark:text-emerald-400" : "text-slate-500 dark:text-slate-400"}`}>
@@ -1057,42 +1230,17 @@
           </article>
         </section>
       {:else}
-        <section class="grid gap-6 lg:grid-cols-[380px_minmax(0,1fr)]">
-          <aside class="rounded-3xl bg-[#2f3a49] p-6 text-white shadow-xl">
-            <h2 class="text-4xl font-black">Listen</h2>
-            <p class="mt-1 text-sm text-slate-200">Nur den 6-stelligen Token eingeben.</p>
+        <section class="mx-auto mt-12 max-w-md rounded-3xl border border-slate-200 bg-white p-8 shadow-xl shadow-slate-200/40 dark:border-slate-800 dark:bg-slate-900 dark:shadow-black/30">
+          <h2 class="text-3xl font-black">Join Session</h2>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Gib nur den 6-stelligen Token ein.</p>
 
-            <label for="listener-token" class="mt-6 block text-xs font-bold uppercase tracking-wide text-slate-300">6-stelliger Token</label>
-            <input id="listener-token" class="mt-2 w-full rounded-xl border border-transparent bg-[#3a4555] px-3 py-2.5 text-sm" bind:value={listenerCode} maxlength="6" />
+          <label for="listener-token" class="mt-6 block text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">6-stelliger Token</label>
+          <input id="listener-token" class="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={listenerCode} maxlength="6" placeholder="123456" />
 
-            <button class="mt-4 w-full rounded-xl bg-orange-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-orange-600" onclick={validateJoin}>Session laden</button>
-
-            <label for="listener-channel" class="mt-6 block text-xs font-bold uppercase tracking-wide text-slate-300">Channel</label>
-            <select id="listener-channel" class="mt-2 w-full rounded-xl border border-transparent bg-[#3a4555] px-3 py-2.5 text-sm" bind:value={selectedChannelId}>
-              <option value="">Bitte wählen</option>
-              {#each listenerChannels as channel}
-                <option value={channel.id}>{channel.name} {channel.languageCode ? `(${channel.languageCode})` : ""}</option>
-              {/each}
-            </select>
-
-            <div class="mt-4 grid grid-cols-2 gap-2">
-              <button class="rounded-xl bg-orange-500 px-3 py-2 text-sm font-semibold text-white hover:bg-orange-600 disabled:opacity-60" onclick={startListening} disabled={!listenerCode.trim() || !selectedChannelId}>Start</button>
-              <button class="rounded-xl border border-white/30 px-3 py-2 text-sm hover:bg-white/10 disabled:opacity-60" onclick={stopListening} disabled={!isListening}>Stop</button>
-            </div>
-            <p class="mt-4 text-xs text-slate-200">{listenerStatus}</p>
-          </aside>
-
-          <section class="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-            {#if listenerSessionImageUrl}
-              <img class="mb-4 h-52 w-full rounded-2xl object-cover" src={listenerSessionImageUrl} alt={listenerSessionName} />
-            {/if}
-            <h3 class="text-3xl font-black">{listenerSessionName || "Session"}</h3>
-            <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">{listenerSessionDescription || "Live channel"}</p>
-            <div class="mt-6 rounded-xl border border-slate-200 p-4 dark:border-slate-800">
-              <audio bind:this={listenerAudio} class="w-full" controls></audio>
-            </div>
-            <p class="mt-4 text-xs text-slate-500 dark:text-slate-400">Session ID: {shortId(listenerSessionId)}</p>
-          </section>
+          <button class="mt-4 w-full rounded-xl bg-orange-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-orange-600 disabled:opacity-60" onclick={enterWithToken} disabled={!/^\d{6}$/.test(listenerCode.trim())}>
+            Weiter
+          </button>
+          <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">{listenerStatus}</p>
         </section>
       {/if}
     {/if}
