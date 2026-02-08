@@ -63,6 +63,24 @@ function channelKey(sessionId: string, channelId: string): string {
   return `${sessionId}:${channelId}`;
 }
 
+function activeProducerChannelsForSession(sessionId: string): number {
+  let count = 0;
+  for (const key of producersByChannel.keys()) {
+    if (key.startsWith(`${sessionId}:`)) count += 1;
+  }
+  return count;
+}
+
+function activeChannelIdsForSession(sessionId: string): string[] {
+  const ids: string[] = [];
+  for (const key of producersByChannel.keys()) {
+    if (!key.startsWith(`${sessionId}:`)) continue;
+    const [, channelId] = key.split(":");
+    if (channelId) ids.push(channelId);
+  }
+  return ids;
+}
+
 async function getOrCreateRouter(sessionId: string): Promise<Router> {
   const existing = routersBySession.get(sessionId);
   if (existing) {
@@ -112,6 +130,25 @@ app.get("/health", (_req, res) => {
     transports: transports.size,
     producers: producersByChannel.size,
     consumers: consumers.size
+  });
+});
+
+app.get("/stats", (_req, res) => {
+  res.json({
+    routers: routersBySession.size,
+    transports: transports.size,
+    producers: producersByChannel.size,
+    consumers: consumers.size
+  });
+});
+
+app.get("/stats/session/:sessionId", (req, res) => {
+  const sessionId = String(req.params.sessionId);
+  const activeChannelIds = activeChannelIdsForSession(sessionId);
+  res.json({
+    sessionId,
+    activeProducerChannels: activeProducerChannelsForSession(sessionId),
+    activeChannelIds
   });
 });
 

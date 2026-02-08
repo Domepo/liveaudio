@@ -12,7 +12,7 @@
     "dev:media": "npm run dev -w @livevoice/media",
     "dev:web": "npm run dev -w @livevoice/web",
     "build": "npm run build -ws",
-    "db:init": "sqlite3 prisma/dev.db < scripts/init-sqlite.sql",
+    "db:init": "./scripts/init-sqlite.sh",
     "prisma:generate": "npx prisma generate",
     "prisma:push": "npx prisma db push --schema=prisma/schema.prisma",
     "prisma:generate:postgres": "npx prisma generate --schema=prisma/schema.postgres.prisma",

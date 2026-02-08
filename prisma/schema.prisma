@@ -29,6 +29,9 @@ model User {
 model Session {
   id              String        @id @default(cuid())
   name            String
+  description     String?
+  imageUrl        String?
+  broadcastCodeHash String?
   status          SessionStatus @default(ACTIVE)
   createdByUserId String?
   createdByUser   User?         @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)

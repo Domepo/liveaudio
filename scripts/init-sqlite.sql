@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS "User" (
 CREATE TABLE IF NOT EXISTS "Session" (
   "id" TEXT PRIMARY KEY NOT NULL,
   "name" TEXT NOT NULL,
+  "description" TEXT,
+  "imageUrl" TEXT,
+  "broadcastCodeHash" TEXT,
   "status" TEXT NOT NULL DEFAULT 'ACTIVE',
   "createdByUserId" TEXT,
   "startedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
