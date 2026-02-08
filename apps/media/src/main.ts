@@ -99,6 +99,11 @@ async function createWebRtcTransport(router: Router): Promise<WebRtcTransport> {
         protocol: "udp",
         ip: MEDIA_LISTEN_IP,
         announcedAddress: MEDIA_ANNOUNCED_IP
+      },
+      {
+        protocol: "tcp",
+        ip: MEDIA_LISTEN_IP,
+        announcedAddress: MEDIA_ANNOUNCED_IP
       }
     ],
     enableUdp: true,
