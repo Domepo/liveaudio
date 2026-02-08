@@ -144,15 +144,30 @@ function detectLanIp(): string {
 }
 
 function buildJoinBaseUrl(req: Request, override?: string): string {
-  if (override) return override;
-  if (process.env.PUBLIC_JOIN_URL) return process.env.PUBLIC_JOIN_URL;
+  if (override) {
+    try {
+      const parsed = new URL(override);
+      if ((parsed.protocol === "https:" && parsed.port === "443") || (parsed.protocol === "http:" && parsed.port === "80")) {
+        parsed.port = "";
+      }
+      return parsed.toString().replace(/\/$/, "");
+    } catch {
+      return override;
+    }
+  }
+  if (process.env.PUBLIC_JOIN_URL) return process.env.PUBLIC_JOIN_URL.replace(/\/$/, "");
 
   const protoHeader = req.headers["x-forwarded-proto"];
   const proto = typeof protoHeader === "string" ? protoHeader.split(",")[0] : req.protocol || "http";
   const hostHeader = (req.headers["x-forwarded-host"] as string | undefined) ?? req.get("host") ?? "localhost:3000";
-  const hostname = hostHeader.split(",")[0].split(":")[0].trim() || "localhost";
+  const hostToken = hostHeader.split(",")[0].trim() || "localhost";
+  const [hostname] = hostToken.split(":");
   const webPort = process.env.PUBLIC_WEB_PORT ?? "5173";
-  return `${proto}://${hostname}:${webPort}`;
+  const isLocal = hostname === "localhost" || hostname === "127.0.0.1";
+  const usePort = isLocal ? webPort : process.env.PUBLIC_WEB_PORT;
+  const hasDefaultPort = (proto === "https" && usePort === "443") || (proto === "http" && usePort === "80");
+  const portPart = usePort && !hasDefaultPort ? `:${usePort}` : "";
+  return `${proto}://${hostname}${portPart}`;
 }
 
 function setAdminCookie(res: Response, token: string): void {
@@ -553,8 +568,10 @@ app.get("/api/network", (req, res) => {
   const reqHost = req.get("host") ?? "";
   const reqHostname = reqHost.split(":")[0] || "localhost";
   const lanIp = detectLanIp();
-  const suggestedJoinBaseUrl = `http://${lanIp}:${process.env.PUBLIC_WEB_PORT ?? "5173"}`;
-  const currentHostJoinBaseUrl = `http://${reqHostname}:${process.env.PUBLIC_WEB_PORT ?? "5173"}`;
+  const webPort = process.env.PUBLIC_WEB_PORT ?? "5173";
+  const useDefaultPort = webPort === "80" || webPort === "443";
+  const suggestedJoinBaseUrl = `http://${lanIp}${useDefaultPort ? "" : `:${webPort}`}`;
+  const currentHostJoinBaseUrl = `http://${reqHostname}${useDefaultPort ? "" : `:${webPort}`}`;
   res.json({ lanIp, suggestedJoinBaseUrl, currentHostJoinBaseUrl });
 });
 

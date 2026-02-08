@@ -37,10 +37,6 @@ Hinweis:
 - API läuft auf Port `3000`
 - Media läuft auf Port `4000` (plus UDP `40000-40100` für WebRTC)
 - Firewall muss diese lokalen Verbindungen erlauben.
-- Für schwierige NAT/Carrier-Netze optional TURN im Frontend setzen:
-  - `VITE_TURN_URLS=turn:your-domain:3478?transport=udp,turn:your-domain:3478?transport=tcp`
-  - `VITE_TURN_USERNAME=...`
-  - `VITE_TURN_PASSWORD=...`
 
 ## Docker-Start (Postgres)
 

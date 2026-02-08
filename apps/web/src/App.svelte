@@ -68,32 +68,8 @@
     return `${window.location.protocol}//${window.location.hostname}:3000`;
   }
 
-  function runtimeIceServers(): RTCIceServer[] | undefined {
-    const urlsRaw = String(import.meta.env.VITE_TURN_URLS ?? "").trim();
-    if (!urlsRaw) return undefined;
-
-    const urls = urlsRaw
-      .split(",")
-      .map((value) => value.trim())
-      .filter(Boolean);
-    if (urls.length === 0) return undefined;
-
-    const username = String(import.meta.env.VITE_TURN_USERNAME ?? "").trim();
-    const credential = String(import.meta.env.VITE_TURN_PASSWORD ?? "").trim();
-    const server: RTCIceServer = {
-      urls: urls.length === 1 ? urls[0] : urls
-    };
-    if (username && credential) {
-      server.username = username;
-      server.credential = credential;
-    }
-
-    return [server];
-  }
-
   const apiUrl = runtimeApiUrl();
   const wsUrl = runtimeWsUrl();
-  const iceServers = runtimeIceServers();
 
   let theme: "light" | "dark" = "light";
   let isAdminRoute = false;
@@ -793,8 +769,7 @@
             id: transportData.transportId,
             iceParameters: transportData.iceParameters as never,
             iceCandidates: transportData.iceCandidates as never,
-            dtlsParameters: transportData.dtlsParameters as never,
-            iceServers
+            dtlsParameters: transportData.dtlsParameters as never
           });
 
           sendTransport.on("connect", async ({ dtlsParameters }, callback, errback) => {
@@ -963,8 +938,7 @@
         id: transportData.transportId,
         iceParameters: transportData.iceParameters as never,
         iceCandidates: transportData.iceCandidates as never,
-        dtlsParameters: transportData.dtlsParameters as never,
-        iceServers
+        dtlsParameters: transportData.dtlsParameters as never
       });
 
       recvTransport.on("connect", async ({ dtlsParameters }, callback, errback) => {
@@ -1082,10 +1056,13 @@
       if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
         joinBaseUrl = net.suggestedJoinBaseUrl;
       } else {
-        joinBaseUrl = `${window.location.protocol}//${window.location.hostname}:5173`;
+        joinBaseUrl = window.location.origin;
       }
     } catch {
-      joinBaseUrl = `${window.location.protocol}//${window.location.hostname}:5173`;
+      joinBaseUrl =
+        window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+          ? `${window.location.protocol}//${window.location.hostname}:5173`
+          : window.location.origin;
     }
 
     if (isAdminRoute) {
