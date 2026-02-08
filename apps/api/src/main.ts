@@ -76,6 +76,31 @@ function generateSessionCode(): string {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
+async function generateUniqueSessionCode(excludeSessionId?: string): Promise<string> {
+  const sessions = await prisma.session.findMany({
+    where: { broadcastCodeHash: { not: null } },
+    select: { id: true, broadcastCodeHash: true }
+  });
+
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const candidate = generateSessionCode();
+    let collision = false;
+
+    for (const session of sessions) {
+      if (excludeSessionId && session.id === excludeSessionId) continue;
+      if (!session.broadcastCodeHash) continue;
+      if (await bcrypt.compare(candidate, session.broadcastCodeHash)) {
+        collision = true;
+        break;
+      }
+    }
+
+    if (!collision) return candidate;
+  }
+
+  throw new Error("Could not generate a unique 6-digit token");
+}
+
 function detectLanIp(): string {
   const nets = os.networkInterfaces();
   for (const list of Object.values(nets)) {
@@ -338,7 +363,7 @@ app.post("/api/admin/sessions", requireAdmin, async (req, res) => {
     return res.status(400).json({ error: "Invalid payload" });
   }
 
-  const broadcastCode = generateSessionCode();
+  const broadcastCode = await generateUniqueSessionCode();
   const broadcastCodeHash = await bcrypt.hash(broadcastCode, 10);
 
   const session = await prisma.session.create({
@@ -421,7 +446,7 @@ app.post("/api/admin/sessions/:sessionId/rotate-code", requireAdmin, async (req,
     return res.status(404).json({ error: "Session not found" });
   }
 
-  const broadcastCode = generateSessionCode();
+  const broadcastCode = await generateUniqueSessionCode(sessionId);
   const broadcastCodeHash = await bcrypt.hash(broadcastCode, 10);
   await prisma.session.update({
     where: { id: sessionId },
@@ -457,7 +482,7 @@ app.post("/api/sessions", requireAdmin, async (req, res) => {
     return res.status(400).json({ error: "Invalid payload" });
   }
 
-  const broadcastCode = generateSessionCode();
+  const broadcastCode = await generateUniqueSessionCode();
   const broadcastCodeHash = await bcrypt.hash(broadcastCode, 10);
 
   const session = await prisma.session.create({
