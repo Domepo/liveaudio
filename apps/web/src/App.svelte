@@ -3,6 +3,9 @@
   import { io, type Socket } from "socket.io-client";
   import { Device } from "mediasoup-client";
   import QRCode from "qrcode";
+  import AdminLoginCard from "./components/AdminLoginCard.svelte";
+  import AdminUsersPanel from "./components/AdminUsersPanel.svelte";
+  import type { AdminRole, AdminUser } from "./types/admin";
 
   type Channel = { id: string; name: string; languageCode?: string | null };
   type AudioInput = { deviceId: string; label: string };
@@ -21,12 +24,21 @@
       peakListeners: number;
       joinRatePerMin: number;
       leaveRatePerMin: number;
+      averageListenersLast10Min: number;
     };
     realtimeGraph: {
       points: Array<{ ts: number; total: number }>;
       perChannel: Array<{ channelId: string; name: string; points: Array<{ ts: number; listeners: number }> }>;
     };
     postSession: {
+      statsSince: string;
+      joinEvents: number;
+      leaveEvents: number;
+      consumeEvents: number;
+      uniqueListeners: number;
+      medianListeningDurationSec: number;
+      p95ListeningDurationSec: number;
+      bounceRate: number;
       averageListeningDurationSec: number;
       heatmap: Array<{ hour: number; joins: number }>;
       channelComparison: Array<{
@@ -38,6 +50,33 @@
         peakListeners: number;
       }>;
     };
+  };
+  type AdminTemplate = {
+    id: string;
+    name: string;
+    description?: string | null;
+    imageUrl?: string | null;
+    channels: Array<{ id: string; name: string; languageCode?: string | null; orderIndex: number }>;
+    createdAt: string;
+  };
+  type SessionRecording = {
+    channelId: string;
+    name: string;
+    size: number;
+    createdAt: string;
+  };
+  type BroadcasterChannelStream = {
+    channelId: string;
+    channelName: string;
+    stream: MediaStream;
+  };
+  type ActiveChannelRecorder = {
+    channelId: string;
+    channelName: string;
+    recorder: MediaRecorder;
+    chunks: Blob[];
+    done: Promise<void>;
+    resolveDone: () => void;
   };
   type AdminSessionSummary = {
     id: string;
@@ -75,16 +114,22 @@
   let isAdminRoute = false;
   let isQuickJoinMode = false;
 
+  let adminName = "";
   let adminPassword = "";
   let adminAuthenticated = false;
-  let adminStatus = "Bitte als Admin anmelden.";
-  let adminCurrentPassword = "";
-  let adminNewPassword = "";
-  let adminConfirmPassword = "";
+  let adminStatus = "Bitte anmelden.";
+  let adminAuthenticatedName = "";
+  let authenticatedRole: AdminRole = "VIEWER";
+  let adminUsers: AdminUser[] = [];
+  let adminRoles: AdminRole[] = ["ADMIN", "BROADCASTER", "VIEWER"];
+  let createUserName = "";
+  let createUserPassword = "";
+  let createUserRole: AdminRole = "VIEWER";
 
   let adminView: "dashboard" | "detail" = "dashboard";
   let dashboardTab: "statistics" | "users" | "settings" | "sessions" = "statistics";
   let adminSessions: AdminSessionSummary[] = [];
+  let adminTemplates: AdminTemplate[] = [];
   let selectedSessionId = "";
   let analyticsSessionId = "";
   let analyticsStatus = "";
@@ -92,6 +137,10 @@
   let createSessionName = "";
   let createSessionDescription = "";
   let createSessionImageUrl = "";
+  let templateChannelsCsv = "Deutsch:de, English:en";
+  let templateName = "";
+  let templateDescription = "";
+  let templateImageUrl = "";
 
   let sessionName = "";
   let sessionDescription = "";
@@ -120,6 +169,10 @@
 
   let broadcasterStatus = "Bereit";
   let isBroadcasting = false;
+  let sessionRecordings: SessionRecording[] = [];
+  let isRecording = false;
+  let recordingStatus = "";
+  let activeChannelRecorders: ActiveChannelRecorder[] = [];
 
   let listenerCode = "";
   let listenerSessionId = "";
@@ -136,12 +189,14 @@
   let listenerAudio: HTMLAudioElement;
   let broadcasterSocket: Socket | null = null;
   let listenerSocket: Socket | null = null;
-  let broadcasterMicStreams: MediaStream[] = [];
+  let broadcasterChannelStreams: BroadcasterChannelStream[] = [];
   let meterAudioContext: AudioContext | null = null;
   let meterAnimationId: number | null = null;
   const channelAnalyzers = new Map<string, { analyser: AnalyserNode; dataArray: Uint8Array; source: MediaStreamAudioSourceNode }>();
   let createImageInputEl: HTMLInputElement;
   let editImageInputEl: HTMLInputElement;
+  let settingsLogoInputEl: HTMLInputElement;
+  let appLogoUrl = "/logo.svg";
   let autoSaveSessionTimer: ReturnType<typeof setTimeout> | null = null;
   let isHydratingSessionMeta = false;
   let lastSavedSessionMeta = { name: "", description: "", imageUrl: "" };
@@ -209,7 +264,7 @@
   }
 
   function parseAdminSessionFromPath(pathname: string): string {
-    const match = pathname.match(/^\/admin\/sessions\/([^/]+)$/);
+    const match = pathname.match(/^\/login\/sessions\/([^/]+)$/);
     if (!match) return "";
     try {
       return decodeURIComponent(match[1]);
@@ -220,7 +275,12 @@
 
   function syncRoute(): void {
     const pathname = window.location.pathname;
-    isAdminRoute = pathname.startsWith("/admin");
+    if (pathname.startsWith("/admin")) {
+      const migrated = pathname.replace(/^\/admin/, "/login");
+      history.replaceState({}, "", `${migrated}${window.location.search}${window.location.hash}`);
+    }
+    const normalizedPathname = window.location.pathname;
+    isAdminRoute = normalizedPathname.startsWith("/login");
 
     if (!isAdminRoute) {
       adminView = "dashboard";
@@ -228,7 +288,7 @@
       return;
     }
 
-    const sessionId = parseAdminSessionFromPath(pathname);
+    const sessionId = parseAdminSessionFromPath(normalizedPathname);
     if (sessionId) {
       adminView = "detail";
       selectedSessionId = sessionId;
@@ -240,16 +300,16 @@
   }
 
   function goToAdminList(): void {
-    history.pushState({}, "", "/admin");
+    history.pushState({}, "", "/login");
     syncRoute();
-    dashboardTab = "sessions";
+    dashboardTab = canAccessTab("sessions") ? "sessions" : "statistics";
     if (adminAuthenticated) {
       void loadAdminSessions();
     }
   }
 
   function goToDashboard(): void {
-    history.pushState({}, "", "/admin");
+    history.pushState({}, "", "/login");
     syncRoute();
     dashboardTab = "statistics";
     if (adminAuthenticated) {
@@ -258,9 +318,20 @@
   }
 
   function goToAdminSession(sessionId: string): void {
-    history.pushState({}, "", `/admin/sessions/${encodeURIComponent(sessionId)}`);
+    history.pushState({}, "", `/login/sessions/${encodeURIComponent(sessionId)}`);
     syncRoute();
     void loadSelectedSession();
+  }
+
+  function canAccessTab(tab: "statistics" | "users" | "settings" | "sessions"): boolean {
+    if (authenticatedRole === "ADMIN") return true;
+    if (authenticatedRole === "BROADCASTER") return tab === "sessions" || tab === "statistics" || tab === "settings";
+    return tab === "statistics";
+  }
+
+  function setDashboardTab(tab: "statistics" | "users" | "settings" | "sessions"): void {
+    if (!canAccessTab(tab)) return;
+    dashboardTab = tab;
   }
 
   function syncChannelAssignments(nextChannels: Channel[]): void {
@@ -368,8 +439,25 @@
   async function refreshAudioInputs(requestPermission = false): Promise<void> {
     try {
       if (requestPermission) {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error("getUserMedia nicht verfügbar");
+        }
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const track = stream.getAudioTracks()[0];
+        if (!navigator.mediaDevices?.enumerateDevices) {
+          audioInputs = [{ deviceId: track?.getSettings().deviceId || "default", label: track?.label || "Mikrofon" }];
+          syncChannelAssignments(channels);
+          stream.getTracks().forEach((mediaTrack) => mediaTrack.stop());
+          return;
+        }
         stream.getTracks().forEach((track) => track.stop());
+      }
+
+      if (!navigator.mediaDevices?.enumerateDevices) {
+        audioInputs = [];
+        const secureHint = window.isSecureContext ? "" : " Verwende https:// oder localhost.";
+        setStatus("broadcaster", `Audio-Geräte nicht verfügbar.${secureHint}`);
+        return;
       }
 
       const devices = await navigator.mediaDevices.enumerateDevices();
@@ -379,7 +467,8 @@
 
       syncChannelAssignments(channels);
     } catch (error) {
-      setStatus("broadcaster", `Audio-Geräte Fehler: ${(error as Error).message}`);
+      const secureHint = window.isSecureContext ? "" : " (Mikrofonzugriff braucht https:// oder localhost)";
+      setStatus("broadcaster", `Audio-Geräte Fehler: ${(error as Error).message}${secureHint}`);
     }
   }
 
@@ -388,12 +477,25 @@
       await fetchJson<{ ok: boolean }>(`${apiUrl}/api/admin/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: adminPassword })
+        body: JSON.stringify({ name: adminName, password: adminPassword })
       });
-      adminAuthenticated = true;
+      adminName = "";
       adminPassword = "";
-      adminStatus = "Admin angemeldet.";
+      await loadAdminSession();
       await loadAdminSessions();
+      if (authenticatedRole === "ADMIN") {
+        await loadAdminUsers();
+        await loadAdminRoles();
+      }
+      if (authenticatedRole === "ADMIN" || authenticatedRole === "BROADCASTER") {
+        await loadTemplates();
+      } else {
+        adminUsers = [];
+        adminTemplates = [];
+      }
+      if (!canAccessTab(dashboardTab)) {
+        dashboardTab = "statistics";
+      }
       if (selectedSessionId) await loadSelectedSession();
     } catch (error) {
       adminStatus = `Fehler: ${(error as Error).message}`;
@@ -405,39 +507,27 @@
       await fetchJson<{ ok: boolean }>(`${apiUrl}/api/admin/logout`, { method: "POST" });
     } finally {
       adminAuthenticated = false;
+      adminAuthenticatedName = "";
+      authenticatedRole = "VIEWER";
+      adminTemplates = [];
+      sessionRecordings = [];
       adminStatus = "Abgemeldet.";
       await stopBroadcast();
       goToAdminList();
     }
   }
 
-  async function changeAdminPassword(): Promise<void> {
-    try {
-      await fetchJson<{ ok: boolean }>(`${apiUrl}/api/admin/change-password`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          currentPassword: adminCurrentPassword,
-          newPassword: adminNewPassword,
-          confirmPassword: adminConfirmPassword
-        })
-      });
-      adminCurrentPassword = "";
-      adminNewPassword = "";
-      adminConfirmPassword = "";
-      adminStatus = "Admin-Passwort wurde geändert.";
-    } catch (error) {
-      adminStatus = `Fehler: ${(error as Error).message}`;
-    }
-  }
-
   async function loadAdminSession(): Promise<void> {
     try {
-      await fetchJson<{ authenticated: boolean }>(`${apiUrl}/api/admin/me`);
+      const data = await fetchJson<{ authenticated: boolean; userName: string; role: AdminRole }>(`${apiUrl}/api/admin/me`);
       adminAuthenticated = true;
-      adminStatus = "Admin angemeldet.";
+      adminAuthenticatedName = data.userName ?? "";
+      authenticatedRole = data.role ?? "VIEWER";
+      adminStatus = "Angemeldet.";
     } catch {
       adminAuthenticated = false;
+      adminAuthenticatedName = "";
+      authenticatedRole = "VIEWER";
     }
   }
 
@@ -445,6 +535,153 @@
     adminSessions = await fetchJson<AdminSessionSummary[]>(`${apiUrl}/api/admin/sessions`);
     if (!analyticsSessionId && adminSessions.length > 0) {
       analyticsSessionId = adminSessions[0].id;
+    }
+  }
+
+  async function loadAdminRoles(): Promise<void> {
+    try {
+      const data = await fetchJson<{ roles: AdminRole[] }>(`${apiUrl}/api/admin/roles`);
+      if (Array.isArray(data.roles) && data.roles.length > 0) {
+        adminRoles = data.roles;
+        if (!adminRoles.includes(createUserRole)) {
+          createUserRole = adminRoles[0];
+        }
+      }
+    } catch {
+      adminRoles = ["ADMIN", "BROADCASTER", "VIEWER"];
+    }
+  }
+
+  async function loadAdminUsers(): Promise<void> {
+    try {
+      adminUsers = await fetchJson<AdminUser[]>(`${apiUrl}/api/admin/users`);
+    } catch (error) {
+      adminStatus = `Fehler: ${(error as Error).message}`;
+    }
+  }
+
+  async function createAdminUser(): Promise<void> {
+    try {
+      await fetchJson<AdminUser>(`${apiUrl}/api/admin/users`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: createUserName,
+          password: createUserPassword,
+          role: createUserRole
+        })
+      });
+      createUserName = "";
+      createUserPassword = "";
+      createUserRole = adminRoles[0] ?? "VIEWER";
+      adminStatus = "Benutzer wurde angelegt.";
+      await loadAdminUsers();
+    } catch (error) {
+      adminStatus = `Fehler: ${(error as Error).message}`;
+    }
+  }
+
+  async function updateAdminUser(payload: { userId: string; name: string; role: AdminRole; password?: string }): Promise<void> {
+    try {
+      await fetchJson<AdminUser>(`${apiUrl}/api/admin/users/${encodeURIComponent(payload.userId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: payload.name,
+          role: payload.role,
+          ...(payload.password ? { password: payload.password } : {})
+        })
+      });
+      adminStatus = "Benutzer wurde aktualisiert.";
+      await loadAdminUsers();
+    } catch (error) {
+      adminStatus = `Fehler: ${(error as Error).message}`;
+    }
+  }
+
+  function parseTemplateChannelsCsv(input: string): Array<{ name: string; languageCode?: string }> {
+    return input
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map((item) => {
+        const [name, languageCode] = item.split(":").map((part) => part.trim());
+        return { name, ...(languageCode ? { languageCode } : {}) };
+      })
+      .filter((channel) => channel.name.length > 0);
+  }
+
+  async function loadTemplates(): Promise<void> {
+    try {
+      adminTemplates = await fetchJson<AdminTemplate[]>(`${apiUrl}/api/admin/templates`);
+    } catch (error) {
+      adminStatus = `Fehler: ${(error as Error).message}`;
+    }
+  }
+
+  async function createTemplate(): Promise<void> {
+    const channelsInput = parseTemplateChannelsCsv(templateChannelsCsv);
+    if (!templateName.trim()) {
+      adminStatus = "Vorlagenname fehlt.";
+      return;
+    }
+    try {
+      await fetchJson<AdminTemplate>(`${apiUrl}/api/admin/templates`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: templateName,
+          description: templateDescription || undefined,
+          imageUrl: templateImageUrl || undefined,
+          channels: channelsInput
+        })
+      });
+      templateName = "";
+      templateDescription = "";
+      templateImageUrl = "";
+      adminStatus = "Vorlage gespeichert.";
+      await loadTemplates();
+    } catch (error) {
+      adminStatus = `Fehler: ${(error as Error).message}`;
+    }
+  }
+
+  async function createSessionFromTemplate(templateId: string): Promise<void> {
+    try {
+      const data = await fetchJson<{ id: string }>(`${apiUrl}/api/admin/templates/${templateId}/create-session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      adminStatus = "Session aus Vorlage erstellt.";
+      await loadAdminSessions();
+      goToAdminSession(data.id);
+    } catch (error) {
+      adminStatus = `Fehler: ${(error as Error).message}`;
+    }
+  }
+
+  async function deleteTemplate(templateId: string): Promise<void> {
+    const ok = window.confirm("Vorlage wirklich löschen?");
+    if (!ok) return;
+    try {
+      await fetchJson<{ ok: boolean }>(`${apiUrl}/api/admin/templates/${templateId}`, { method: "DELETE" });
+      adminStatus = "Vorlage gelöscht.";
+      await loadTemplates();
+    } catch (error) {
+      adminStatus = `Fehler: ${(error as Error).message}`;
+    }
+  }
+
+  async function loadSessionRecordings(): Promise<void> {
+    if (!selectedSessionId) {
+      sessionRecordings = [];
+      return;
+    }
+    try {
+      sessionRecordings = await fetchJson<SessionRecording[]>(`${apiUrl}/api/admin/sessions/${selectedSessionId}/recordings`);
+    } catch {
+      sessionRecordings = [];
     }
   }
 
@@ -519,6 +756,8 @@
     joinQrDataUrl = "";
     channelDbLevels = {};
     isHydratingSessionMeta = false;
+    await loadSessionRecordings();
+    await generateJoin(true);
   }
 
   async function deleteSession(sessionId: string): Promise<void> {
@@ -669,13 +908,13 @@
     }
   }
 
-  async function generateJoin(): Promise<void> {
+  async function generateJoin(silent = false): Promise<void> {
     if (!selectedSessionId) {
-      setStatus("broadcaster", "Bitte zuerst Session wählen.");
+      if (!silent) setStatus("broadcaster", "Bitte zuerst Session wählen.");
       return;
     }
     if (!sessionCode || !/^\d{6}$/.test(sessionCode.trim())) {
-      setStatus("broadcaster", "6-stelligen Token setzen.");
+      if (!silent) setStatus("broadcaster", "6-stelligen Token setzen.");
       return;
     }
 
@@ -695,9 +934,88 @@
         width: 360,
         color: { dark: "#0f172a", light: "#ffffff" }
       });
-      setStatus("broadcaster", "QR erzeugt.");
+      if (!silent) setStatus("broadcaster", "QR erzeugt.");
     } catch (error) {
-      setStatus("broadcaster", `Fehler: ${(error as Error).message}`);
+      if (!silent) setStatus("broadcaster", `Fehler: ${(error as Error).message}`);
+    }
+  }
+
+  async function uploadRecordingBlob(channelId: string, blob: Blob): Promise<void> {
+    if (!selectedSessionId) return;
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.onerror = () => reject(new Error("Could not read recording"));
+      reader.readAsDataURL(blob);
+    });
+    await fetchJson(`${apiUrl}/api/admin/sessions/${selectedSessionId}/recordings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        channelId,
+        dataUrl
+      })
+    });
+  }
+
+  async function startRecording(): Promise<void> {
+    if (isRecording || !isBroadcasting || broadcasterChannelStreams.length === 0) return;
+    if (!window.MediaRecorder) {
+      recordingStatus = "Aufnahme wird von diesem Browser nicht unterstützt.";
+      return;
+    }
+    const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm";
+    const recorders: ActiveChannelRecorder[] = broadcasterChannelStreams.map((channelStream) => {
+      let resolveDone: () => void = () => undefined;
+      const done = new Promise<void>((resolve) => {
+        resolveDone = resolve;
+      });
+      const recorder = new MediaRecorder(channelStream.stream, { mimeType });
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
+      };
+      recorder.onstop = async () => {
+        try {
+          const blob = new Blob(chunks, { type: "audio/webm" });
+          if (blob.size > 0) {
+            await uploadRecordingBlob(channelStream.channelId, blob);
+          }
+        } catch (error) {
+          recordingStatus = `Fehler bei Aufnahme (${channelStream.channelName}): ${(error as Error).message}`;
+        } finally {
+          resolveDone();
+        }
+      };
+      recorder.start(1000);
+      return {
+        channelId: channelStream.channelId,
+        channelName: channelStream.channelName,
+        recorder,
+        chunks,
+        done,
+        resolveDone
+      };
+    });
+    activeChannelRecorders = recorders;
+    isRecording = true;
+    recordingStatus = `Aufnahme läuft (${recorders.length} Kanal/Kanäle)...`;
+  }
+
+  async function stopRecording(): Promise<void> {
+    if (!isRecording) return;
+    isRecording = false;
+    const recorders = [...activeChannelRecorders];
+    for (const recorderState of recorders) {
+      if (recorderState.recorder.state !== "inactive") {
+        recorderState.recorder.stop();
+      }
+    }
+    await Promise.all(recorders.map((recorderState) => recorderState.done));
+    activeChannelRecorders = [];
+    await loadSessionRecordings();
+    if (!recordingStatus.startsWith("Fehler")) {
+      recordingStatus = "Aufnahmen gespeichert.";
     }
   }
 
@@ -754,7 +1072,7 @@
             : { autoGainControl: true, noiseSuppression: true, echoCancellation: true };
 
           const stream = await navigator.mediaDevices.getUserMedia({ audio: constraints, video: false });
-          broadcasterMicStreams.push(stream);
+          broadcasterChannelStreams.push({ channelId: channel.id, channelName: channel.name, stream });
           await attachLevelMeter(channel.id, stream);
           const track = stream.getAudioTracks()[0];
 
@@ -808,6 +1126,7 @@
 
       if (produced.length === 0) throw new Error("Kein Kanal konnte gestartet werden.");
       isBroadcasting = true;
+      await startRecording();
       setStatus(
         "broadcaster",
         failed.length > 0
@@ -822,18 +1141,22 @@
   }
 
   async function stopBroadcast(): Promise<void> {
+    if (isRecording) {
+      await stopRecording();
+    }
     broadcasterSocket?.disconnect();
     broadcasterSocket = null;
 
-    for (const stream of broadcasterMicStreams) {
-      stream.getTracks().forEach((track) => track.stop());
+    for (const channelStream of broadcasterChannelStreams) {
+      channelStream.stream.getTracks().forEach((track) => track.stop());
     }
-    broadcasterMicStreams = [];
+    broadcasterChannelStreams = [];
     stopLevelMeters();
 
     isBroadcasting = false;
     setStatus("broadcaster", "Broadcast gestoppt");
     await refreshSessionStats();
+    await loadSessionRecordings();
   }
 
   async function validateJoin(): Promise<void> {
@@ -1006,6 +1329,78 @@
     anchor.click();
   }
 
+  async function printQrCard(): Promise<void> {
+    const printWindow = window.open("", "_blank", "width=900,height=1200");
+    if (!printWindow) return;
+    printWindow.document.open();
+    printWindow.document.write(
+      "<!doctype html><html><body style='font-family:Segoe UI,sans-serif;padding:24px'>QR wird vorbereitet...</body></html>"
+    );
+    printWindow.document.close();
+
+    if (!joinQrDataUrl || !joinUrl) {
+      await generateJoin(true);
+    }
+    if (!joinQrDataUrl || !joinUrl) {
+      printWindow.document.open();
+      printWindow.document.write(
+        "<!doctype html><html><body style='font-family:Segoe UI,sans-serif;padding:24px'>Kein QR verfügbar. Bitte zuerst einen gültigen Token setzen.</body></html>"
+      );
+      printWindow.document.close();
+      return;
+    }
+    const title = sessionName || "Live Session";
+    const tokenText = sessionCode?.trim() || "------";
+    const html = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>QR Print</title>
+    <style>
+      body { font-family: 'Avenir Next', 'Segoe UI', sans-serif; margin: 0; color: #0f172a; background: #fff; }
+      .sheet { min-height: 100vh; display: grid; place-items: center; padding: 28px; }
+      .layout { width: 100%; max-width: 860px; text-align: center; }
+      h1 { margin: 0 0 18px; font-size: 52px; font-weight: 900; letter-spacing: -0.025em; }
+      .qr { width: 430px; max-width: 86vw; display: block; margin: 0 auto; }
+      .token { margin-top: 28px; font-size: 64px; font-weight: 900; letter-spacing: 0.12em; line-height: 1; }
+      .url { margin-top: 16px; font-size: 28px; font-weight: 700; line-height: 1.35; word-break: break-all; }
+      @media print { .sheet { padding: 0; } }
+    </style>
+  </head>
+  <body>
+    <main class="sheet">
+      <section class="layout">
+      <h1>${title.replace(/</g, "&lt;")}</h1>
+      <img class="qr" src="${joinQrDataUrl}" alt="Join QR Code" />
+      <div class="token">${tokenText.replace(/</g, "&lt;")}</div>
+      <div class="url">${joinUrl.replace(/</g, "&lt;")}</div>
+      </section>
+    </main>
+  </body>
+</html>`;
+    printWindow.document.open();
+    printWindow.document.write(html);
+    printWindow.document.close();
+    printWindow.onload = () => {
+      printWindow.print();
+    };
+  }
+
+  async function deleteRecording(recording: SessionRecording): Promise<void> {
+    if (!selectedSessionId) return;
+    const ok = window.confirm("Aufnahme wirklich löschen?");
+    if (!ok) return;
+    try {
+      await fetchJson<{ ok: boolean }>(
+        `${apiUrl}/api/admin/sessions/${selectedSessionId}/recordings/${encodeURIComponent(recording.channelId)}/${encodeURIComponent(recording.name)}`,
+        { method: "DELETE" }
+      );
+      await loadSessionRecordings();
+    } catch (error) {
+      recordingStatus = `Fehler beim Löschen: ${(error as Error).message}`;
+    }
+  }
+
   async function handleCreateImageUpload(event: Event): Promise<void> {
     const target = event.target as HTMLInputElement;
     const file = target.files?.[0];
@@ -1030,12 +1425,34 @@
     target.value = "";
   }
 
+  async function handleSettingsLogoUpload(event: Event): Promise<void> {
+    const target = event.target as HTMLInputElement;
+    const file = target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      appLogoUrl = String(reader.result ?? "/logo.svg");
+      localStorage.setItem("livevoice-app-logo", appLogoUrl);
+    };
+    reader.readAsDataURL(file);
+    target.value = "";
+  }
+
+  function resetAppLogo(): void {
+    appLogoUrl = "/logo.svg";
+    localStorage.removeItem("livevoice-app-logo");
+  }
+
   onMount(async () => {
     const savedTheme = localStorage.getItem("livevoice-theme") as "light" | "dark" | null;
     if (savedTheme === "light" || savedTheme === "dark") {
       applyTheme(savedTheme);
     } else {
       applyTheme(window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    }
+    const savedLogo = localStorage.getItem("livevoice-app-logo");
+    if (savedLogo && savedLogo.trim()) {
+      appLogoUrl = savedLogo;
     }
 
     syncRoute();
@@ -1069,10 +1486,24 @@
       await loadAdminSession();
       if (adminAuthenticated) {
         await loadAdminSessions();
+        if (authenticatedRole === "ADMIN") {
+          await loadAdminRoles();
+          await loadAdminUsers();
+        } else {
+          adminUsers = [];
+        }
+        if (authenticatedRole === "ADMIN" || authenticatedRole === "BROADCASTER") {
+          await loadTemplates();
+        } else {
+          adminTemplates = [];
+        }
+        if (!canAccessTab(dashboardTab)) {
+          dashboardTab = "statistics";
+        }
         if (dashboardTab === "statistics") {
           await loadSessionAnalytics();
         }
-        if (adminView === "detail" && selectedSessionId) {
+        if (adminView === "detail" && selectedSessionId && canAccessTab("sessions")) {
           await loadSelectedSession();
         }
       }
@@ -1085,7 +1516,7 @@
     }
 
     const statsInterval = setInterval(() => {
-      if (isAdminRoute && adminAuthenticated && adminView === "detail" && selectedSessionId) {
+      if (isAdminRoute && adminAuthenticated && canAccessTab("sessions") && adminView === "detail" && selectedSessionId) {
         void refreshSessionStats();
       }
       if (isAdminRoute && adminAuthenticated && adminView === "dashboard" && dashboardTab === "statistics") {
@@ -1105,7 +1536,7 @@
     };
   });
 
-  $: if (isAdminRoute && adminAuthenticated && adminView === "detail" && selectedSessionId && !isHydratingSessionMeta) {
+  $: if (isAdminRoute && adminAuthenticated && canAccessTab("sessions") && adminView === "detail" && selectedSessionId && !isHydratingSessionMeta) {
     sessionName;
     sessionDescription;
     sessionImageUrl;
@@ -1123,11 +1554,11 @@
     <div class="mx-auto flex max-w-[1440px] items-center justify-between px-6 py-4">
       <div class="flex items-center gap-3">
         <div class="grid h-9 w-9 place-items-center overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
-          <img class="h-full w-full object-cover" src="/logo.svg" alt="Logo" />
+          <img class="h-full w-full object-cover" src={appLogoUrl} alt="Logo" />
         </div>  
         <button class="text-sm font-semibold hover:text-orange-500" onclick={goToDashboard}>Dashboard</button>
         {#if isAdminRoute}
-          {#if adminView !== "dashboard" || dashboardTab === "sessions"}
+          {#if canAccessTab("sessions") && (adminView !== "dashboard" || dashboardTab === "sessions")}
             <div class="text-slate-400">›</div>
             <button class="text-sm font-semibold hover:text-orange-500" onclick={goToAdminList}>My Sessions</button>
           {/if}
@@ -1137,31 +1568,59 @@
           {/if}
         {/if}
       </div>
-      <button class="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800" onclick={toggleTheme}>
-        {theme === "dark" ? "Light" : "Dark"}
-      </button>
+      <div class="flex items-center gap-2">
+        {#if isAdminRoute && adminAuthenticated}
+          <button
+            class="grid h-9 w-9 place-items-center rounded-xl border border-slate-300 bg-white hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
+            onclick={adminLogout}
+            title="Logout"
+            aria-label="Logout"
+          >
+            <svg viewBox="0 0 24 24" class="h-5 w-5" aria-hidden="true">
+              <path d="M10 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+              <path d="M16 17l5-5-5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+              <path d="M21 12H9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+          </button>
+        {/if}
+        <button
+          class="grid h-9 w-9 place-items-center rounded-xl border border-slate-300 bg-white hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
+          onclick={toggleTheme}
+          title={theme === "dark" ? "Light Mode" : "Dark Mode"}
+          aria-label={theme === "dark" ? "Light Mode" : "Dark Mode"}
+        >
+          {#if theme === "dark"}
+            <svg viewBox="0 0 24 24" class="h-5 w-5" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" fill="currentColor"></circle>
+              <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+            </svg>
+          {:else}
+            <svg viewBox="0 0 24 24" class="h-5 w-5" aria-hidden="true">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3c0 0 0 0 0 0A7 7 0 0 0 21 12.79z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+          {/if}
+        </button>
+      </div>
     </div>
   </header>
 
   <div class="mx-auto max-w-[1440px] px-6 py-8">
     {#if isAdminRoute}
       {#if !adminAuthenticated}
-        <section class="mx-auto mt-12 max-w-md rounded-3xl border border-slate-200 bg-white p-8 shadow-xl shadow-slate-200/50 dark:border-slate-800 dark:bg-slate-900 dark:shadow-black/30">
-          <h2 class="text-2xl font-black">Admin Login</h2>
-          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Nur mit Admin-Rechten kann eine Broadcast-Session erstellt werden.</p>
-          <label for="admin-password" class="mt-6 block text-xs font-bold uppercase tracking-wide text-slate-500">Passwort</label>
-          <input id="admin-password" class="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" type="password" bind:value={adminPassword} placeholder="Admin Passwort" />
-          <button class="mt-4 w-full rounded-xl bg-orange-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-orange-600" onclick={adminLogin}>Anmelden</button>
-          <p class="mt-3 text-sm text-slate-600 dark:text-slate-300">{adminStatus}</p>
-        </section>
-      {:else if adminView === "dashboard"}
+        <AdminLoginCard bind:adminName bind:adminPassword {adminStatus} on:login={adminLogin} />
+      {:else if adminView === "dashboard" || !canAccessTab("sessions")}
         <section class="grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
           <aside class="rounded-3xl border border-slate-200 bg-white/85 p-4 shadow-xl shadow-slate-200/40 dark:border-slate-800 dark:bg-slate-900/85 dark:shadow-black/30">
-            <button class={`w-full rounded-xl px-4 py-2 text-left text-sm font-semibold ${dashboardTab === "sessions" ? "bg-orange-500 text-white" : "hover:bg-slate-50 dark:hover:bg-slate-800"}`} onclick={() => (dashboardTab = "sessions")}>Meine Sessions</button>
-            <button class={`mb-2 w-full rounded-xl px-4 py-2 text-left text-sm font-semibold ${dashboardTab === "statistics" ? "bg-orange-500 text-white" : "hover:bg-slate-100 dark:hover:bg-slate-800"}`} onclick={() => (dashboardTab = "statistics")}>Statistiken</button>
-            <button class={`mb-2 w-full rounded-xl px-4 py-2 text-left text-sm font-semibold ${dashboardTab === "users" ? "bg-orange-500 text-white" : "hover:bg-slate-100 dark:hover:bg-slate-800"}`} onclick={() => (dashboardTab = "users")}>Nutzerverwaltung</button>
-            <button class={`mb-2 w-full rounded-xl px-4 py-2 text-left text-sm font-semibold ${dashboardTab === "settings" ? "bg-orange-500 text-white" : "hover:bg-slate-100 dark:hover:bg-slate-800"}`} onclick={() => (dashboardTab = "settings")}>Einstellungen</button>
-            <button class="mt-4 w-full rounded-xl border border-slate-300 px-4 py-2 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={adminLogout}>Logout</button>
+            {#if canAccessTab("sessions")}
+              <button class={`w-full rounded-xl px-4 py-2 text-left text-sm font-semibold ${dashboardTab === "sessions" ? "bg-orange-500 text-white" : "hover:bg-slate-50 dark:hover:bg-slate-800"}`} onclick={() => setDashboardTab("sessions")}>Meine Sessions</button>
+            {/if}
+            <button class={`mb-2 w-full rounded-xl px-4 py-2 text-left text-sm font-semibold ${dashboardTab === "statistics" ? "bg-orange-500 text-white" : "hover:bg-slate-100 dark:hover:bg-slate-800"}`} onclick={() => setDashboardTab("statistics")}>Statistiken</button>
+            {#if canAccessTab("users")}
+              <button class={`mb-2 w-full rounded-xl px-4 py-2 text-left text-sm font-semibold ${dashboardTab === "users" ? "bg-orange-500 text-white" : "hover:bg-slate-100 dark:hover:bg-slate-800"}`} onclick={() => setDashboardTab("users")}>Nutzerverwaltung</button>
+            {/if}
+            {#if canAccessTab("settings")}
+              <button class={`mb-2 w-full rounded-xl px-4 py-2 text-left text-sm font-semibold ${dashboardTab === "settings" ? "bg-orange-500 text-white" : "hover:bg-slate-100 dark:hover:bg-slate-800"}`} onclick={() => setDashboardTab("settings")}>Einstellungen</button>
+            {/if}
             <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">{adminStatus}</p>
           </aside>
 
@@ -1181,12 +1640,27 @@
               </div>
 
               {#if sessionAnalytics}
-                <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+                <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-6">
                   <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Live Listener</p><p class="mt-1 text-3xl font-black">{sessionAnalytics.live.totalListeners}</p></div>
                   <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Peak Listener</p><p class="mt-1 text-3xl font-black">{sessionAnalytics.live.peakListeners}</p></div>
+                  <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Ø Listener (10 Min)</p><p class="mt-1 text-3xl font-black">{sessionAnalytics.live.averageListenersLast10Min.toFixed(1)}</p></div>
                   <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Ø Hördauer</p><p class="mt-1 text-3xl font-black">{sessionAnalytics.postSession.averageListeningDurationSec.toFixed(0)}s</p></div>
+                  <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Unique Listener</p><p class="mt-1 text-3xl font-black">{sessionAnalytics.postSession.uniqueListeners}</p></div>
                   <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Join-Rate/min</p><p class="mt-1 text-3xl font-black">{sessionAnalytics.live.joinRatePerMin.toFixed(2)}</p></div>
                   <div class="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"><p class="text-xs text-slate-500">Leave-Rate/min</p><p class="mt-1 text-3xl font-black">{sessionAnalytics.live.leaveRatePerMin.toFixed(2)}</p></div>
+                </div>
+
+                <div class="mt-4 rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                  <h3 class="text-lg font-black">Weitere Metriken</h3>
+                  <div class="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4 text-sm">
+                    <p>Stats seit: <span class="font-semibold">{new Date(sessionAnalytics.postSession.statsSince).toLocaleString()}</span></p>
+                    <p>Joins: <span class="font-semibold">{sessionAnalytics.postSession.joinEvents}</span></p>
+                    <p>Leaves: <span class="font-semibold">{sessionAnalytics.postSession.leaveEvents}</span></p>
+                    <p>Consumes: <span class="font-semibold">{sessionAnalytics.postSession.consumeEvents}</span></p>
+                    <p>Median Hördauer: <span class="font-semibold">{sessionAnalytics.postSession.medianListeningDurationSec.toFixed(0)}s</span></p>
+                    <p>P95 Hördauer: <span class="font-semibold">{sessionAnalytics.postSession.p95ListeningDurationSec.toFixed(0)}s</span></p>
+                    <p>Bounce Rate: <span class="font-semibold">{(sessionAnalytics.postSession.bounceRate * 100).toFixed(1)}%</span></p>
+                  </div>
                 </div>
 
                 <div class="mt-4 rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
@@ -1255,23 +1729,17 @@
                 </div>
               {/if}
             {:else if dashboardTab === "users"}
-              <div class="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
-                <h3 class="text-xl font-black">Nutzerverwaltung</h3>
-                <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Admin-Passwort ändern</p>
-
-                <label for="admin-current-password" class="mt-4 block text-[11px] font-bold uppercase tracking-wide text-slate-500">Aktuelles Passwort</label>
-                <input id="admin-current-password" type="password" class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900" bind:value={adminCurrentPassword} />
-
-                <label for="admin-new-password" class="mt-3 block text-[11px] font-bold uppercase tracking-wide text-slate-500">Neues Passwort</label>
-                <input id="admin-new-password" type="password" class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900" bind:value={adminNewPassword} />
-
-                <label for="admin-confirm-password" class="mt-3 block text-[11px] font-bold uppercase tracking-wide text-slate-500">Bestätigung</label>
-                <input id="admin-confirm-password" type="password" class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900" bind:value={adminConfirmPassword} />
-
-                <button class="mt-4 rounded-xl bg-orange-500 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-600 disabled:opacity-50" onclick={changeAdminPassword} disabled={!adminCurrentPassword || !adminNewPassword || adminNewPassword !== adminConfirmPassword}>
-                  Passwort speichern
-                </button>
-              </div>
+              <AdminUsersPanel
+                {adminAuthenticatedName}
+                {adminUsers}
+                {adminRoles}
+                bind:createUserName
+                bind:createUserPassword
+                bind:createUserRole
+                on:refreshUsers={loadAdminUsers}
+                on:createUser={createAdminUser}
+                on:updateUser={(event) => updateAdminUser(event.detail)}
+              />
             {:else if dashboardTab === "sessions"}
               <section class="grid gap-6 lg:grid-cols-[420px_minmax(0,1fr)]">
                 <aside class="rounded-3xl border border-slate-200 bg-white/85 p-6 shadow-xl shadow-slate-200/40 dark:border-slate-800 dark:bg-slate-900/85 dark:shadow-black/30">
@@ -1298,10 +1766,46 @@
                   <button class="mt-6 w-full rounded-xl bg-orange-500 px-4 py-3 text-sm font-semibold text-white hover:bg-orange-600 disabled:opacity-60" onclick={createAdminSession} disabled={!createSessionName.trim()}>
                     Session erstellen
                   </button>
+                  <div class="mt-6 border-t border-slate-200 pt-4 dark:border-slate-700">
+                    <h3 class="text-sm font-black">Session-Vorlage speichern</h3>
+                    <label for="template-name" class="mt-3 block text-xs font-bold uppercase tracking-wide text-slate-500">Vorlagenname</label>
+                    <input id="template-name" class="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={templateName} placeholder="Sonntag Standard" />
+                    <label for="template-description" class="mt-3 block text-xs font-bold uppercase tracking-wide text-slate-500">Beschreibung</label>
+                    <input id="template-description" class="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={templateDescription} placeholder="Wöchentliche Gottesdienst-Session" />
+                    <label for="template-image" class="mt-3 block text-xs font-bold uppercase tracking-wide text-slate-500">Bild URL</label>
+                    <input id="template-image" class="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={templateImageUrl} placeholder="https://..." />
+                    <label for="template-channels" class="mt-3 block text-xs font-bold uppercase tracking-wide text-slate-500">Channels (Name:Sprache, ...)</label>
+                    <input id="template-channels" class="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={templateChannelsCsv} placeholder="Deutsch:de, English:en" />
+                    <button class="mt-3 w-full rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800 disabled:opacity-60" onclick={createTemplate} disabled={!templateName.trim()}>
+                      Vorlage speichern
+                    </button>
+                  </div>
                   <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">{broadcasterStatus}</p>
                 </aside>
 
                 <section>
+                  <div class="mb-4 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+                    <div class="mb-3 flex items-center justify-between">
+                      <h3 class="text-lg font-black">Vorlagen</h3>
+                      <button class="rounded-xl border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={loadTemplates}>Aktualisieren</button>
+                    </div>
+                    {#if adminTemplates.length === 0}
+                      <p class="text-sm text-slate-500 dark:text-slate-400">Keine Vorlagen vorhanden.</p>
+                    {:else}
+                      <div class="grid gap-2 sm:grid-cols-2">
+                        {#each adminTemplates as template}
+                          <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+                            <p class="font-semibold">{template.name}</p>
+                            <p class="text-xs text-slate-500 dark:text-slate-400">{template.channels.map((c) => c.name).join(", ") || "Keine Channels"}</p>
+                            <div class="mt-2 flex gap-2">
+                              <button class="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={() => createSessionFromTemplate(template.id)}>Session erstellen</button>
+                              <button class="rounded-lg border border-red-300 px-2 py-1 text-xs text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/20" onclick={() => deleteTemplate(template.id)}>Löschen</button>
+                            </div>
+                          </div>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
                   <div class="mb-4 flex items-center justify-between">
                     <h3 class="text-2xl font-black">Bestehende Sessions</h3>
                     <button class="rounded-xl border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={loadAdminSessions}>Aktualisieren</button>
@@ -1341,9 +1845,19 @@
             {:else}
               <div class="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
                 <h3 class="text-xl font-black">Einstellungen</h3>
-                <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Hier kannst du globale Dashboard-Einstellungen konfigurieren.</p>
-                <div class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm dark:border-slate-700 dark:bg-slate-800">
-                  Aktives Logo: <code>/logo.svg</code>
+                <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Hier kannst du das Dashboard-Logo ändern.</p>
+                <div class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
+                  <p class="text-sm font-semibold">Aktives Logo</p>
+                  <img class="mt-3 h-20 w-20 rounded-xl border border-slate-200 bg-white object-cover p-1 dark:border-slate-700 dark:bg-slate-900" src={appLogoUrl} alt="Aktives Logo" />
+                  <input bind:this={settingsLogoInputEl} class="hidden" type="file" accept="image/*" onchange={handleSettingsLogoUpload} />
+                  <div class="mt-3 flex flex-wrap gap-2">
+                    <button class="rounded-xl border border-slate-300 px-3 py-2 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700" onclick={() => settingsLogoInputEl?.click()}>
+                      Logo hochladen
+                    </button>
+                    <button class="rounded-xl border border-slate-300 px-3 py-2 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700" onclick={resetAppLogo}>
+                      Auf Standard zurücksetzen
+                    </button>
+                  </div>
                 </div>
               </div>
             {/if}
@@ -1360,7 +1874,7 @@
             <button class="rounded-2xl border border-slate-300 bg-white p-4 text-sm font-semibold hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800" onclick={refreshSessionStats}>Refresh Stats</button>
           </div>
 
-          <div class="grid gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
+          <div class="grid gap-6 lg:grid-cols-[360px_minmax(0,1fr)_360px]">
             <aside class="rounded-3xl border border-slate-200 bg-white p-6 text-slate-900 shadow-xl dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100">
               <div class="flex items-center justify-between">
                 <h2 class="text-3xl font-black">Speak</h2>
@@ -1396,10 +1910,42 @@
               </button>
               <button class="mt-2 w-full rounded-xl border border-red-300 px-4 py-2 text-sm text-slate-900 hover:bg-red-50 dark:border-red-800 dark:text-slate-100 dark:hover:bg-red-900/20" onclick={() => deleteSession(selectedSessionId)}>Session löschen</button>
               <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">{broadcasterStatus}</p>
+
+              <div class="mt-5 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+                <div class="flex items-center justify-between">
+                  <p class="text-sm font-semibold">Aufnahmen</p>
+                  <button class="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={loadSessionRecordings}>Reload</button>
+                </div>
+                {#if isBroadcasting}
+                  <button class="mt-2 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={isRecording ? stopRecording : startRecording}>
+                    {isRecording ? "Aufnahme stoppen" : "Aufnahme starten"}
+                  </button>
+                {/if}
+                {#if recordingStatus}
+                  <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">{recordingStatus}</p>
+                {/if}
+                {#if sessionRecordings.length > 0}
+                  <div class="mt-3 max-h-40 space-y-2 overflow-auto">
+                    {#each sessionRecordings as recording}
+                      <div class="flex items-center gap-2 rounded-lg border border-slate-200 px-2 py-1 text-xs dark:border-slate-700">
+                        <a class="flex-1 hover:text-orange-500" href={`${apiUrl}/api/admin/sessions/${selectedSessionId}/recordings/${encodeURIComponent(recording.channelId)}/${encodeURIComponent(recording.name)}`} target="_blank" rel="noreferrer">
+                          [{channels.find((c) => c.id === recording.channelId)?.name || recording.channelId}] {new Date(recording.createdAt).toLocaleString()} ({(recording.size / 1024 / 1024).toFixed(1)} MB)
+                        </a>
+                        <button class="rounded-md border border-red-300 px-2 py-0.5 text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/20" onclick={() => deleteRecording(recording)}>
+                          🗑
+                        </button>
+                      </div>
+                    {/each}
+                  </div>
+                {:else}
+                  <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">Noch keine Aufnahmen.</p>
+                {/if}
+              </div>
             </aside>
 
-            <section class="space-y-4">
-              <div class="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <section class="rounded-3xl border border-slate-200 bg-white p-6 text-slate-900 shadow-xl dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100">
+              <h2 class="text-3xl font-black">Channels</h2>
+              <div class="mt-4 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
                 <div class="h-44 w-full bg-slate-200 dark:bg-slate-800">
                   {#if sessionImageUrl}
                     <img class="h-full w-full object-cover" src={sessionImageUrl} alt={sessionName} />
@@ -1412,77 +1958,80 @@
                 </div>
               </div>
 
-              <article class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-                <h4 class="text-lg font-bold">Channels</h4>
-                <div class="mt-3 grid gap-2 sm:grid-cols-3">
-                  <input class="rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={channelName} placeholder="Deutsch" />
-                  <input class="rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={channelLanguage} placeholder="de / en" />
-                  <button class="rounded-xl bg-orange-500 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-600" onclick={createChannel}>Add channel</button>
-                </div>
+              <div class="mt-4 grid gap-2 sm:grid-cols-3">
+                <input class="rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={channelName} placeholder="Deutsch" />
+                <input class="rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={channelLanguage} placeholder="de / en" />
+                <button class="rounded-xl bg-orange-500 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-600" onclick={createChannel}>Add channel</button>
+              </div>
 
-                <div class="mt-4 space-y-3">
-                  {#if channels.length === 0}
-                    <div class="rounded-xl border border-dashed border-slate-300 p-5 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">Noch keine Channels vorhanden.</div>
-                  {:else}
-                    {#each channels as channel}
-                      <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
-                        <div class="flex flex-wrap items-center gap-3">
-                          <div class="min-w-[170px]">
-                            <p class="font-semibold">{channel.name}</p>
-                            <p class="text-xs text-orange-500">{channel.languageCode || "channel"}</p>
-                            <p class={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${channelIsLive(channel.id, "admin") ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300" : "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"}`}>
-                              {channelIsLive(channel.id, "admin") ? "LIVE" : "OFFLINE"}
-                            </p>
-                          </div>
-                          <select class="flex-1 rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={channelInputAssignments[channel.id]}>
-                            <option value="">Standardgerät</option>
-                            {#each audioInputs as input}
-                              <option value={input.deviceId}>{input.label}</option>
-                            {/each}
-                          </select>
-                          <button class="rounded-xl border border-red-200 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/20" onclick={() => deleteChannel(channel.id)}>
-                            Delete
-                          </button>
+              <div class="mt-4 space-y-3">
+                {#if channels.length === 0}
+                  <div class="rounded-xl border border-dashed border-slate-300 p-5 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">Noch keine Channels vorhanden.</div>
+                {:else}
+                  {#each channels as channel}
+                    <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+                      <div class="flex flex-wrap items-center gap-3">
+                        <div class="min-w-[170px]">
+                          <p class="font-semibold">{channel.name}</p>
+                          <p class="text-xs text-orange-500">{channel.languageCode || "channel"}</p>
+                          <p class={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${channelIsLive(channel.id, "admin") ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300" : "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"}`}>
+                            {channelIsLive(channel.id, "admin") ? "LIVE" : "OFFLINE"}
+                          </p>
                         </div>
-                        <div class="mt-3">
-                          <div class="mb-1 flex items-center justify-between text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                            <span>Input Level</span>
-                            <span>{channelDbLevels[channel.id] ?? -60} dB</span>
-                          </div>
-                          <div class="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-                            <div
-                              class={`h-full transition-[width] duration-100 ${meterBarClass(channelDbLevels[channel.id] ?? -60)}`}
-                              style={`width: ${channelDbToPercent(channelDbLevels[channel.id] ?? -60)}%`}
-                            ></div>
-                          </div>
+                        <select class="flex-1 rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={channelInputAssignments[channel.id]}>
+                          <option value="">Standardgerät</option>
+                          {#each audioInputs as input}
+                            <option value={input.deviceId}>{input.label}</option>
+                          {/each}
+                        </select>
+                        <button class="rounded-xl border border-red-200 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/20" onclick={() => deleteChannel(channel.id)}>
+                          Delete
+                        </button>
+                      </div>
+                      <div class="mt-3">
+                        <div class="mb-1 flex items-center justify-between text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                          <span>Input Level</span>
+                          <span>{channelDbLevels[channel.id] ?? -60} dB</span>
+                        </div>
+                        <div class="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                          <div
+                            class={`h-full transition-[width] duration-100 ${meterBarClass(channelDbLevels[channel.id] ?? -60)}`}
+                            style={`width: ${channelDbToPercent(channelDbLevels[channel.id] ?? -60)}%`}
+                          ></div>
                         </div>
                       </div>
-                    {/each}
-                  {/if}
-                </div>
-              </article>
-
-              <article class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-                <h4 class="text-lg font-bold">Join & QR</h4>
-                <label for="join-base-url" class="mt-3 block text-xs font-bold uppercase tracking-wide text-slate-500">Join Base URL</label>
-                <input id="join-base-url" class="mt-1 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={joinBaseUrl} />
-
-                <div class="mt-3 flex flex-wrap gap-2">
-                  <button class="rounded-xl bg-orange-500 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-600" onclick={generateJoin}>Generate QR</button>
-                  {#if joinUrl}
-                    <button class="rounded-xl border border-slate-300 px-4 py-2 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={() => copy(joinUrl)}>Copy link</button>
-                    <button class="rounded-xl border border-slate-300 px-4 py-2 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={downloadQr}>Download QR</button>
-                  {/if}
-                </div>
-
-                {#if joinUrl}
-                  <p class="mt-3 break-all rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800">{joinUrl}</p>
+                    </div>
+                  {/each}
                 {/if}
-                {#if joinQrDataUrl}
-                  <img class="mt-4 w-44 rounded-xl border border-slate-200 dark:border-slate-700" src={joinQrDataUrl} alt="Join QR" />
-                {/if}
-              </article>
+              </div>
             </section>
+
+            <aside class="rounded-3xl border border-slate-200 bg-white p-6 text-slate-900 shadow-xl dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100">
+              <h2 class="text-3xl font-black">QRCode</h2>
+              {#if joinQrDataUrl}
+                <img class="mt-4 w-56 rounded-xl border border-slate-200 dark:border-slate-700" src={joinQrDataUrl} alt="Join QR" />
+              {:else}
+                <div class="mt-4 rounded-xl border border-dashed border-slate-300 p-4 text-xs text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                  QR wird automatisch generiert, sobald ein gültiger 6-stelliger Token vorhanden ist.
+                </div>
+              {/if}
+
+              <label for="join-base-url" class="mt-5 block text-xs font-bold uppercase tracking-wide text-slate-500">Join Base URL</label>
+              <input id="join-base-url" class="mt-1 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={joinBaseUrl} />
+
+              <div class="mt-3 flex flex-wrap gap-2">
+                <button class="rounded-xl bg-orange-500 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-600" onclick={generateJoin}>Generate QR</button>
+                {#if joinUrl}
+                  <button class="rounded-xl border border-slate-300 px-4 py-2 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={() => copy(joinUrl)}>Copy link</button>
+                  <button class="rounded-xl border border-slate-300 px-4 py-2 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={downloadQr}>Download QR</button>
+                  <button class="rounded-xl border border-slate-300 px-4 py-2 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800" onclick={printQrCard}>Drucken</button>
+                {/if}
+              </div>
+
+              {#if joinUrl}
+                <p class="mt-3 break-all rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800">{joinUrl}</p>
+              {/if}
+            </aside>
           </div>
         </section>
       {/if}

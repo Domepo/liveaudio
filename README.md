@@ -46,7 +46,7 @@ npm run dev:docker
 
 ## MVP-Flow
 
-1. Im Tab **Broadcaster** Session erstellen.
+1. Im Bereich **Admin** mit Name + Passwort anmelden (Default lokal: `admin` / `test`, sofern kein Admin-Benutzer angelegt wurde).
 2. Channel erstellen.
 3. Join-Link + PIN erzeugen (inkl. QR-Code).
 4. Broadcast starten (Mic-Freigabe).

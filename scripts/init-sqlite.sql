@@ -2,10 +2,12 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS "User" (
   "id" TEXT PRIMARY KEY NOT NULL,
+  "name" TEXT NOT NULL UNIQUE,
   "email" TEXT NOT NULL UNIQUE,
+  "passwordHash" TEXT NOT NULL,
   "role" TEXT NOT NULL,
   "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CHECK ("role" IN ('BROADCASTER','LISTENER','ADMIN'))
+  CHECK ("role" IN ('BROADCASTER','VIEWER','ADMIN'))
 );
 
 CREATE TABLE IF NOT EXISTS "Session" (
@@ -86,3 +88,28 @@ CREATE TABLE IF NOT EXISTS "AppConfig" (
   "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS "SessionTemplate" (
+  "id" TEXT PRIMARY KEY NOT NULL,
+  "name" TEXT NOT NULL,
+  "description" TEXT,
+  "imageUrl" TEXT,
+  "createdById" TEXT,
+  "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS "SessionTemplate_createdAt_idx" ON "SessionTemplate"("createdAt");
+
+CREATE TABLE IF NOT EXISTS "TemplateChannel" (
+  "id" TEXT PRIMARY KEY NOT NULL,
+  "templateId" TEXT NOT NULL,
+  "name" TEXT NOT NULL,
+  "languageCode" TEXT,
+  "orderIndex" INTEGER NOT NULL DEFAULT 0,
+  "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY ("templateId") REFERENCES "SessionTemplate"("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS "TemplateChannel_templateId_orderIndex_idx" ON "TemplateChannel"("templateId","orderIndex");

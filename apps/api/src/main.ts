@@ -1,6 +1,11 @@
 import "dotenv/config";
 import http from "node:http";
 import os from "node:os";
+import path from "node:path";
+import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import express from "express";
 import type { NextFunction, Request, Response } from "express";
 import cors from "cors";
@@ -10,7 +15,7 @@ import rateLimit from "express-rate-limit";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import axios from "axios";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Role } from "@prisma/client";
 import { Server } from "socket.io";
 import { z } from "zod";
 
@@ -28,9 +33,26 @@ const API_PORT = Number(process.env.API_PORT ?? 3000);
 const API_HOST = process.env.API_HOST ?? "0.0.0.0";
 const JWT_SECRET = process.env.JWT_SECRET ?? "dev-secret";
 const ADMIN_SESSION_COOKIE = "admin_session";
+const ADMIN_LOGIN_NAME = process.env.ADMIN_LOGIN_NAME ?? "admin";
 const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH ?? "$2a$12$CBpEnaQBlvvAY/Z.kqa/JOCAawr.Hdn48.x44Vae4DuyEklXWm0ea"; // "test"
+const ADMIN_LOGIN_NAME_CONFIG_KEY = "ADMIN_LOGIN_NAME";
 const ADMIN_PASSWORD_CONFIG_KEY = "ADMIN_PASSWORD_HASH";
 const MEDIA_BASE_URL = process.env.MEDIA_BASE_URL ?? "http://localhost:4000";
+const SESSION_STATS_SINCE_PREFIX = "SESSION_STATS_SINCE:";
+const RECORDINGS_ROOT = path.join(process.cwd(), "recordings");
+const MAX_RECORDINGS_PER_SESSION = 10;
+const execFileAsync = promisify(execFile);
+
+type AdminAuthContext = {
+  authType: "legacy" | "user";
+  userName: string;
+  userRole: Role;
+  userId?: string;
+};
+
+type AdminRequest = Request & {
+  admin?: AdminAuthContext;
+};
 
 app.use(
   cors({
@@ -52,7 +74,7 @@ app.use((req, _res, next) => {
     return;
   }
 
-  const remapRoots = ["/admin", "/sessions", "/join", "/network", "/public"];
+  const remapRoots = ["/admin", "/login", "/sessions", "/join", "/network", "/public"];
   const shouldRemap = remapRoots.some((root) => req.path === root || req.path.startsWith(`${root}/`));
   if (shouldRemap) {
     req.url = `/api${req.url}`;
@@ -76,7 +98,10 @@ const adminLoginLimiter = rateLimit({
 });
 
 type AdminJwtPayload = {
-  role: "ADMIN";
+  role: Role;
+  authType: "legacy" | "user";
+  userName: string;
+  userId?: string;
 };
 
 type ListenerSocketAuth = { role: "LISTENER"; sessionId: string };
@@ -201,23 +226,45 @@ function parseCookies(cookieHeader?: string): Record<string, string> {
   return out;
 }
 
-function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+function requireAuthenticated(req: Request, res: Response, next: NextFunction): void {
+  const adminReq = req as AdminRequest;
   const raw = parseCookies(req.headers.cookie)[ADMIN_SESSION_COOKIE];
   if (!raw || typeof raw !== "string") {
-    res.status(401).json({ error: "Admin authentication required" });
+    res.status(401).json({ error: "Authentication required" });
     return;
   }
 
   try {
     const payload = jwt.verify(raw, JWT_SECRET) as AdminJwtPayload;
-    if (payload.role !== "ADMIN") {
+    if (!["ADMIN", "BROADCASTER", "VIEWER"].includes(payload.role)) {
       res.status(403).json({ error: "Forbidden" });
       return;
     }
+    adminReq.admin = {
+      authType: payload.authType,
+      userName: payload.userName,
+      userRole: payload.role,
+      userId: payload.userId
+    };
     next();
   } catch {
-    res.status(401).json({ error: "Admin session invalid" });
+    res.status(401).json({ error: "Session invalid" });
   }
+}
+
+function requireRoles(allowed: Role[]) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const auth = (req as AdminRequest).admin;
+    if (!auth) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (!allowed.includes(auth.userRole)) {
+      res.status(403).json({ error: "Insufficient permissions" });
+      return;
+    }
+    next();
+  };
 }
 
 const createSessionSchema = z.object({
@@ -226,7 +273,10 @@ const createSessionSchema = z.object({
   imageUrl: z.string().max(1_000_000).optional()
 });
 const createChannelSchema = z.object({ name: z.string().min(2).max(50), languageCode: z.string().max(8).optional() });
-const adminLoginSchema = z.object({ password: z.string().min(1).max(200) });
+const adminLoginSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  password: z.string().min(1).max(200)
+});
 const changeAdminPasswordSchema = z
   .object({
     currentPassword: z.string().min(1).max(200),
@@ -236,6 +286,37 @@ const changeAdminPasswordSchema = z
   .refine((input) => input.newPassword === input.confirmPassword, {
     message: "Passwords do not match",
     path: ["confirmPassword"]
+  });
+const createAdminUserSchema = z.object({
+  name: z.string().trim().min(2).max(100),
+  password: z.string().min(6).max(200),
+  role: z.nativeEnum(Role)
+});
+const templateChannelSchema = z.object({
+  name: z.string().trim().min(1).max(50),
+  languageCode: z.string().trim().max(8).optional()
+});
+const createTemplateSchema = z.object({
+  name: z.string().trim().min(2).max(100),
+  description: z.string().max(2000).optional(),
+  imageUrl: z.string().max(1_000_000).optional(),
+  channels: z.array(templateChannelSchema).max(20).default([])
+});
+const createSessionFromTemplateSchema = z.object({
+  name: z.string().trim().min(2).max(100).optional()
+});
+const createRecordingSchema = z.object({
+  channelId: z.string().min(1).max(100),
+  dataUrl: z.string().min(10)
+});
+const updateAdminUserSchema = z
+  .object({
+    name: z.string().trim().min(2).max(100).optional(),
+    password: z.string().min(6).max(200).optional(),
+    role: z.nativeEnum(Role).optional()
+  })
+  .refine((input) => input.name !== undefined || input.password !== undefined || input.role !== undefined, {
+    message: "At least one field is required"
   });
 const createJoinLinkSchema = z.object({
   joinBaseUrl: z.string().url().optional(),
@@ -320,6 +401,134 @@ async function getEffectiveAdminPasswordHash(): Promise<string> {
   return config?.value ?? ADMIN_PASSWORD_HASH;
 }
 
+async function getEffectiveAdminLoginName(): Promise<string> {
+  const config = await prisma.appConfig.findUnique({
+    where: { key: ADMIN_LOGIN_NAME_CONFIG_KEY },
+    select: { value: true }
+  });
+  return (config?.value ?? ADMIN_LOGIN_NAME).trim();
+}
+
+function normalizeForLookup(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function buildPseudoEmailFromName(name: string): string {
+  const base = name
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\w\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 40) || "user";
+  const suffix = Math.random().toString(36).slice(2, 8);
+  return `${base}-${suffix}@local.admin`;
+}
+
+function appConfigSessionStatsSinceKey(sessionId: string): string {
+  return `${SESSION_STATS_SINCE_PREFIX}${sessionId}`;
+}
+
+async function getSessionStatsSince(sessionId: string): Promise<Date> {
+  const config = await prisma.appConfig.findUnique({
+    where: { key: appConfigSessionStatsSinceKey(sessionId) },
+    select: { value: true }
+  });
+  if (!config?.value) return new Date(0);
+  const parsed = new Date(config.value);
+  if (Number.isNaN(parsed.getTime())) return new Date(0);
+  return parsed;
+}
+
+async function markSessionStatsSinceNow(sessionId: string): Promise<void> {
+  await prisma.appConfig.upsert({
+    where: { key: appConfigSessionStatsSinceKey(sessionId) },
+    create: { key: appConfigSessionStatsSinceKey(sessionId), value: new Date().toISOString() },
+    update: { value: new Date().toISOString() }
+  });
+}
+
+function safeRecordingName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+async function ensureSessionRecordingsDir(sessionId: string): Promise<string> {
+  const sessionDir = path.join(RECORDINGS_ROOT, safeRecordingName(sessionId));
+  await fs.mkdir(sessionDir, { recursive: true });
+  return sessionDir;
+}
+
+async function ensureChannelRecordingsDir(sessionId: string, channelId: string): Promise<string> {
+  const channelDir = path.join(await ensureSessionRecordingsDir(sessionId), safeRecordingName(channelId));
+  await fs.mkdir(channelDir, { recursive: true });
+  return channelDir;
+}
+
+async function listSessionRecordings(sessionId: string): Promise<Array<{ channelId: string; name: string; size: number; createdAt: string }>> {
+  const sessionDir = await ensureSessionRecordingsDir(sessionId);
+  const entries = await fs.readdir(sessionDir, { withFileTypes: true }).catch(() => []);
+  const byChannelFiles = await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory())
+      .map(async (channelDirEntry) => {
+        const channelId = channelDirEntry.name;
+        const channelDirPath = path.join(sessionDir, channelId);
+        const files = await fs.readdir(channelDirPath).catch(() => []);
+        return Promise.all(
+          files
+            .filter((entry) => entry.endsWith(".mp3"))
+            .map(async (entry) => {
+              const fullPath = path.join(channelDirPath, entry);
+              const stat = await fs.stat(fullPath);
+              return {
+                channelId,
+                name: entry,
+                size: stat.size,
+                createdAt: stat.birthtime.toISOString(),
+                mtimeMs: stat.mtimeMs
+              };
+            })
+        );
+      })
+  );
+
+  const flatFiles = byChannelFiles.flat();
+  flatFiles.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return flatFiles.map(({ mtimeMs: _mtimeMs, ...rest }) => rest);
+}
+
+async function pruneChannelRecordings(sessionId: string, channelId: string): Promise<void> {
+  const channelDir = await ensureChannelRecordingsDir(sessionId, channelId);
+  const entries = await fs.readdir(channelDir).catch(() => []);
+  const files = await Promise.all(
+    entries
+      .filter((entry) => entry.endsWith(".mp3"))
+      .map(async (entry) => {
+        const fullPath = path.join(channelDir, entry);
+        const stat = await fs.stat(fullPath);
+        return { fullPath, mtimeMs: stat.mtimeMs };
+      })
+  );
+  files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const toDelete = files.slice(MAX_RECORDINGS_PER_SESSION);
+  await Promise.all(toDelete.map((file) => fs.unlink(file.fullPath).catch(() => undefined)));
+}
+
+async function transcodeWebmToMp3(inputPath: string, outputPath: string): Promise<void> {
+  await execFileAsync("ffmpeg", [
+    "-y",
+    "-i",
+    inputPath,
+    "-vn",
+    "-codec:a",
+    "libmp3lame",
+    "-q:a",
+    "2",
+    outputPath
+  ]);
+}
+
 async function fetchSessionStats(sessionId: string): Promise<{
   channelsTotal: number;
   channelsActive: number;
@@ -381,12 +590,21 @@ async function buildSessionAnalytics(sessionId: string): Promise<{
     peakListeners: number;
     joinRatePerMin: number;
     leaveRatePerMin: number;
+    averageListenersLast10Min: number;
   };
   realtimeGraph: {
     points: Array<{ ts: number; total: number }>;
     perChannel: Array<{ channelId: string; name: string; points: Array<{ ts: number; listeners: number }> }>;
   };
   postSession: {
+    statsSince: string;
+    joinEvents: number;
+    leaveEvents: number;
+    consumeEvents: number;
+    uniqueListeners: number;
+    medianListeningDurationSec: number;
+    p95ListeningDurationSec: number;
+    bounceRate: number;
     averageListeningDurationSec: number;
     heatmap: Array<{ hour: number; joins: number }>;
     channelComparison: Array<{
@@ -405,15 +623,15 @@ async function buildSessionAnalytics(sessionId: string): Promise<{
   });
   const channelNameById = new Map(channels.map((channel) => [channel.id, channel.name]));
 
+  const statsSince = await getSessionStatsSince(sessionId);
   const now = Date.now();
-  const last24h = new Date(now - 24 * 60 * 60 * 1000);
   const logs = await prisma.accessLog.findMany({
     where: {
       sessionId,
-      createdAt: { gte: last24h },
-      eventType: { in: ["LISTENER_JOIN", "LISTENER_LEAVE"] }
+      createdAt: { gte: statsSince },
+      eventType: { in: ["LISTENER_JOIN", "LISTENER_LEAVE", "LISTENER_CONSUME"] }
     },
-    select: { channelId: true, eventType: true, createdAt: true, reason: true },
+    select: { channelId: true, eventType: true, createdAt: true, reason: true, ip: true, userAgent: true },
     orderBy: { createdAt: "asc" }
   });
 
@@ -433,6 +651,9 @@ async function buildSessionAnalytics(sessionId: string): Promise<{
   const leaves10 = last10min.filter((log) => log.eventType === "LISTENER_LEAVE").length;
   const joinRatePerMin = joins10 / 10;
   const leaveRatePerMin = leaves10 / 10;
+  const history10 = history.filter((point) => point.ts >= now - 10 * 60 * 1000);
+  const averageListenersLast10Min =
+    history10.length > 0 ? history10.reduce((sum, point) => sum + point.total, 0) / history10.length : totalListeners;
 
   const hourBuckets = Array.from({ length: 24 }, (_, hour) => ({ hour, joins: 0 }));
   for (const log of logs) {
@@ -454,6 +675,11 @@ async function buildSessionAnalytics(sessionId: string): Promise<{
   const allDurations = Array.from(durationsByChannel.values()).flat();
   const averageListeningDurationSec =
     allDurations.length > 0 ? allDurations.reduce((sum, value) => sum + value, 0) / allDurations.length : 0;
+  const sortedDurations = [...allDurations].sort((a, b) => a - b);
+  const medianListeningDurationSec =
+    sortedDurations.length > 0 ? sortedDurations[Math.floor(sortedDurations.length / 2)] : 0;
+  const p95Index = Math.max(0, Math.floor(sortedDurations.length * 0.95) - 1);
+  const p95ListeningDurationSec = sortedDurations.length > 0 ? sortedDurations[p95Index] : 0;
 
   const joinsByChannel = new Map<string, number>();
   const leavesByChannel = new Map<string, number>();
@@ -492,19 +718,40 @@ async function buildSessionAnalytics(sessionId: string): Promise<{
     points: history.map((point) => ({ ts: point.ts, listeners: point.channels[channel.id] ?? 0 }))
   }));
 
+  const joinEvents = logs.filter((log) => log.eventType === "LISTENER_JOIN").length;
+  const leaveEvents = logs.filter((log) => log.eventType === "LISTENER_LEAVE").length;
+  const consumeEvents = logs.filter((log) => log.eventType === "LISTENER_CONSUME").length;
+  const listenerKeys = new Set(
+    logs
+      .filter((log) => log.eventType === "LISTENER_JOIN" || log.eventType === "LISTENER_CONSUME")
+      .map((log) => `${log.ip ?? "unknown"}|${log.userAgent ?? "unknown"}`)
+  );
+  const uniqueListeners = listenerKeys.size;
+  const shortJoins = allDurations.filter((duration) => duration <= 30).length;
+  const bounceRate = joinEvents > 0 ? shortJoins / joinEvents : 0;
+
   return {
     live: {
       listenersPerChannel,
       totalListeners,
       peakListeners,
       joinRatePerMin,
-      leaveRatePerMin
+      leaveRatePerMin,
+      averageListenersLast10Min
     },
     realtimeGraph: {
       points: history.map((point) => ({ ts: point.ts, total: point.total })),
       perChannel: perChannelSeries
     },
     postSession: {
+      statsSince: statsSince.toISOString(),
+      joinEvents,
+      leaveEvents,
+      consumeEvents,
+      uniqueListeners,
+      medianListeningDurationSec,
+      p95ListeningDurationSec,
+      bounceRate,
       averageListeningDurationSec,
       heatmap: hourBuckets,
       channelComparison
@@ -599,13 +846,88 @@ app.post("/api/admin/login", adminLoginLimiter, async (req, res) => {
     return res.status(400).json({ error: "Invalid payload" });
   }
 
-  const effectiveHash = await getEffectiveAdminPasswordHash();
-  const ok = await bcrypt.compare(parsed.data.password, effectiveHash);
-  if (!ok) {
-    return res.status(401).json({ error: "Invalid admin password" });
+  const loginName = parsed.data.name.trim();
+  const lookupName = normalizeForLookup(loginName);
+  const users = await prisma.user.findMany({
+    select: { id: true, name: true, passwordHash: true }
+  });
+  const matchedUser = users.find((user) => normalizeForLookup(user.name) === lookupName);
+
+  if (matchedUser?.passwordHash) {
+    const fullUser = await prisma.user.findUnique({
+      where: { id: matchedUser.id },
+      select: { id: true, name: true, role: true, passwordHash: true }
+    });
+    if (!fullUser) {
+      return res.status(401).json({ error: "Ungültiger Name oder Passwort" });
+    }
+    const ok = await bcrypt.compare(parsed.data.password, fullUser.passwordHash);
+    if (!ok) {
+      return res.status(401).json({ error: "Ungültiger Name oder Passwort" });
+    }
+
+    const token = jwt.sign(
+      {
+        role: fullUser.role,
+        authType: "user",
+        userName: fullUser.name,
+        userId: fullUser.id
+      } satisfies AdminJwtPayload,
+      JWT_SECRET,
+      { expiresIn: "12h" }
+    );
+    setAdminCookie(res, token);
+    return res.json({ ok: true });
   }
 
-  const token = jwt.sign({ role: "ADMIN" } satisfies AdminJwtPayload, JWT_SECRET, { expiresIn: "12h" });
+  const adminUser = await prisma.user.findFirst({
+    where: { role: "ADMIN" }
+  });
+  if (adminUser) {
+    return res.status(401).json({ error: "Ungültiger Name oder Passwort" });
+  }
+
+  const effectiveName = normalizeForLookup(await getEffectiveAdminLoginName());
+  const effectiveHash = await getEffectiveAdminPasswordHash();
+  const passwordOk = await bcrypt.compare(parsed.data.password, effectiveHash);
+  if (!passwordOk || lookupName !== effectiveName) {
+    return res.status(401).json({ error: "Ungültiger Name oder Passwort" });
+  }
+
+  // Bootstrap first admin account from legacy credentials so user management is immediately usable.
+  const existingUsers = await prisma.user.findMany({
+    select: { name: true }
+  });
+  let bootstrapName = parsed.data.name.trim();
+  let suffix = 1;
+  while (existingUsers.some((user) => normalizeForLookup(user.name) === normalizeForLookup(bootstrapName))) {
+    bootstrapName = `${parsed.data.name.trim()}-${suffix}`;
+    suffix += 1;
+  }
+
+  const bootstrapAdmin = await prisma.user.create({
+    data: {
+      name: bootstrapName,
+      email: buildPseudoEmailFromName(bootstrapName),
+      role: "ADMIN",
+      passwordHash: effectiveHash
+    },
+    select: {
+      id: true,
+      name: true
+    }
+  });
+
+  const token = jwt.sign(
+    {
+      role: "ADMIN",
+      authType: "user",
+      userName: bootstrapAdmin.name,
+      userId: bootstrapAdmin.id
+    } satisfies AdminJwtPayload,
+    JWT_SECRET,
+    { expiresIn: "12h" }
+  );
   setAdminCookie(res, token);
   return res.json({ ok: true });
 });
@@ -615,14 +937,41 @@ app.post("/api/admin/logout", (_req, res) => {
   return res.json({ ok: true });
 });
 
-app.get("/api/admin/me", requireAdmin, (_req, res) => {
-  return res.json({ authenticated: true });
+app.get("/api/admin/me", requireAuthenticated, (req, res) => {
+  const admin = (req as AdminRequest).admin;
+  return res.json({ authenticated: true, userName: admin?.userName ?? "user", role: admin?.userRole ?? "VIEWER" });
 });
 
-app.post("/api/admin/change-password", requireAdmin, async (req, res) => {
+app.post("/api/admin/change-password", requireAuthenticated, async (req, res) => {
   const parsed = changeAdminPasswordSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid payload" });
+  }
+
+  const admin = (req as AdminRequest).admin;
+  if (!admin) {
+    return res.status(401).json({ error: "Authentication required" });
+  }
+
+  if (admin.authType === "user" && admin.userId) {
+    const user = await prisma.user.findUnique({
+      where: { id: admin.userId }
+    });
+    if (!user) {
+      return res.status(401).json({ error: "Session invalid" });
+    }
+
+    const currentOk = await bcrypt.compare(parsed.data.currentPassword, user.passwordHash);
+    if (!currentOk) {
+      return res.status(401).json({ error: "Current password is invalid" });
+    }
+
+    const newHash = await bcrypt.hash(parsed.data.newPassword, 12);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash: newHash }
+    });
+    return res.json({ ok: true });
   }
 
   const effectiveHash = await getEffectiveAdminPasswordHash();
@@ -630,7 +979,6 @@ app.post("/api/admin/change-password", requireAdmin, async (req, res) => {
   if (!currentOk) {
     return res.status(401).json({ error: "Current password is invalid" });
   }
-
   const newHash = await bcrypt.hash(parsed.data.newPassword, 12);
   await prisma.appConfig.upsert({
     where: { key: ADMIN_PASSWORD_CONFIG_KEY },
@@ -641,7 +989,327 @@ app.post("/api/admin/change-password", requireAdmin, async (req, res) => {
   return res.json({ ok: true });
 });
 
-app.get("/api/admin/sessions", requireAdmin, async (_req, res) => {
+app.get("/api/admin/roles", requireAuthenticated, requireRoles(["ADMIN"]), (_req, res) => {
+  return res.json({ roles: Object.values(Role) });
+});
+
+app.get("/api/admin/users", requireAuthenticated, requireRoles(["ADMIN"]), async (_req, res) => {
+  const users = await prisma.user.findMany({
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      name: true,
+      role: true,
+      createdAt: true
+    }
+  });
+  return res.json(users);
+});
+
+app.post("/api/admin/users", requireAuthenticated, requireRoles(["ADMIN"]), async (req, res) => {
+  const parsed = createAdminUserSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid payload" });
+  }
+
+  const existingUsers = await prisma.user.findMany({
+    select: { id: true, name: true }
+  });
+  const existing = existingUsers.find((user) => normalizeForLookup(user.name) === normalizeForLookup(parsed.data.name));
+  if (existing) {
+    return res.status(409).json({ error: "Ein Benutzer mit diesem Namen existiert bereits" });
+  }
+
+  const passwordHash = await bcrypt.hash(parsed.data.password, 12);
+  const created = await prisma.user.create({
+    data: {
+      name: parsed.data.name.trim(),
+      email: buildPseudoEmailFromName(parsed.data.name),
+      role: parsed.data.role,
+      passwordHash
+    },
+    select: {
+      id: true,
+      name: true,
+      role: true,
+      createdAt: true
+    }
+  });
+
+  return res.status(201).json(created);
+});
+
+app.patch("/api/admin/users/:userId", requireAuthenticated, requireRoles(["ADMIN"]), async (req, res) => {
+  const parsed = updateAdminUserSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid payload" });
+  }
+
+  const userId = String(req.params.userId);
+  const targetUser = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true }
+  });
+  if (!targetUser) {
+    return res.status(404).json({ error: "Benutzer nicht gefunden" });
+  }
+
+  if (parsed.data.name) {
+    const existingUsers = await prisma.user.findMany({
+      select: { id: true, name: true }
+    });
+    const nameCollision = existingUsers.find(
+      (user) => user.id !== userId && normalizeForLookup(user.name) === normalizeForLookup(parsed.data.name ?? "")
+    );
+    if (nameCollision) {
+      return res.status(409).json({ error: "Ein Benutzer mit diesem Namen existiert bereits" });
+    }
+  }
+
+  const updateData: {
+    name?: string;
+    role?: Role;
+    passwordHash?: string;
+  } = {};
+
+  if (parsed.data.name) updateData.name = parsed.data.name.trim();
+  if (parsed.data.role) updateData.role = parsed.data.role;
+  if (parsed.data.password) {
+    updateData.passwordHash = await bcrypt.hash(parsed.data.password, 12);
+  }
+
+  const updated = await prisma.user.update({
+    where: { id: userId },
+    data: updateData,
+    select: {
+      id: true,
+      name: true,
+      role: true,
+      createdAt: true
+    }
+  });
+
+  return res.json(updated);
+});
+
+app.get("/api/admin/templates", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (_req, res) => {
+  const templates = await prisma.sessionTemplate.findMany({
+    orderBy: { createdAt: "desc" },
+    include: {
+      channels: {
+        orderBy: { orderIndex: "asc" },
+        select: { id: true, name: true, languageCode: true, orderIndex: true }
+      }
+    }
+  });
+  return res.json(templates);
+});
+
+app.post("/api/admin/templates", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (req, res) => {
+  const parsed = createTemplateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid payload" });
+  }
+  const auth = (req as AdminRequest).admin;
+  const template = await prisma.sessionTemplate.create({
+    data: {
+      name: parsed.data.name.trim(),
+      description: parsed.data.description,
+      imageUrl: parsed.data.imageUrl,
+      createdById: auth?.userId,
+      channels: {
+        create: parsed.data.channels.map((channel, index) => ({
+          name: channel.name.trim(),
+          languageCode: channel.languageCode?.trim() || undefined,
+          orderIndex: index
+        }))
+      }
+    },
+    include: {
+      channels: {
+        orderBy: { orderIndex: "asc" },
+        select: { id: true, name: true, languageCode: true, orderIndex: true }
+      }
+    }
+  });
+  return res.status(201).json(template);
+});
+
+app.post(
+  "/api/admin/templates/:templateId/create-session",
+  requireAuthenticated,
+  requireRoles(["ADMIN", "BROADCASTER"]),
+  async (req, res) => {
+    const parsed = createSessionFromTemplateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid payload" });
+    }
+
+    const templateId = String(req.params.templateId);
+    const template = await prisma.sessionTemplate.findUnique({
+      where: { id: templateId },
+      include: { channels: { orderBy: { orderIndex: "asc" } } }
+    });
+    if (!template) {
+      return res.status(404).json({ error: "Template not found" });
+    }
+
+    const broadcastCode = await generateUniqueSessionCode();
+    const broadcastCodeHash = await bcrypt.hash(broadcastCode, 10);
+    const session = await prisma.session.create({
+      data: {
+        name: parsed.data.name?.trim() || template.name,
+        description: template.description,
+        imageUrl: template.imageUrl,
+        broadcastCode,
+        broadcastCodeHash,
+        channels: {
+          create: template.channels.map((channel) => ({
+            name: channel.name,
+            languageCode: channel.languageCode
+          }))
+        }
+      }
+    });
+
+    return res.status(201).json({
+      id: session.id,
+      name: session.name,
+      description: session.description,
+      imageUrl: session.imageUrl,
+      status: session.status,
+      createdAt: session.createdAt,
+      broadcastCode
+    });
+  }
+);
+
+app.delete(
+  "/api/admin/templates/:templateId",
+  requireAuthenticated,
+  requireRoles(["ADMIN", "BROADCASTER"]),
+  async (req, res) => {
+    const templateId = String(req.params.templateId);
+    try {
+      await prisma.sessionTemplate.delete({ where: { id: templateId } });
+      return res.json({ ok: true });
+    } catch {
+      return res.status(404).json({ error: "Template not found" });
+    }
+  }
+);
+
+app.get(
+  "/api/admin/sessions/:sessionId/recordings",
+  requireAuthenticated,
+  requireRoles(["ADMIN", "BROADCASTER", "VIEWER"]),
+  async (req, res) => {
+    const sessionId = String(req.params.sessionId);
+    const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { id: true } });
+    if (!session) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+    const recordings = await listSessionRecordings(sessionId);
+    return res.json(recordings);
+  }
+);
+
+app.post(
+  "/api/admin/sessions/:sessionId/recordings",
+  requireAuthenticated,
+  requireRoles(["ADMIN", "BROADCASTER"]),
+  async (req, res) => {
+    const sessionId = String(req.params.sessionId);
+    const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { id: true } });
+    if (!session) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+    const parsed = createRecordingSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid payload" });
+    }
+    const channel = await prisma.channel.findUnique({
+      where: { id: parsed.data.channelId },
+      select: { id: true, sessionId: true }
+    });
+    if (!channel || channel.sessionId !== sessionId) {
+      return res.status(404).json({ error: "Channel not found" });
+    }
+    const matched = parsed.data.dataUrl.match(/^data:audio\/[\w.+-]+;base64,(.+)$/);
+    if (!matched) {
+      return res.status(400).json({ error: "Invalid audio payload" });
+    }
+    const binary = Buffer.from(matched[1], "base64");
+    if (binary.length === 0) {
+      return res.status(400).json({ error: "Empty recording" });
+    }
+    const channelDir = await ensureChannelRecordingsDir(sessionId, parsed.data.channelId);
+    const baseName = `${Date.now()}-${randomUUID().slice(0, 8)}`;
+    const tempWebmPath = path.join(channelDir, `${baseName}.webm`);
+    const mp3Path = path.join(channelDir, `${baseName}.mp3`);
+    await fs.writeFile(tempWebmPath, binary);
+    try {
+      await transcodeWebmToMp3(tempWebmPath, mp3Path);
+    } catch {
+      await fs.unlink(tempWebmPath).catch(() => undefined);
+      return res.status(500).json({ error: "MP3-Konvertierung fehlgeschlagen" });
+    }
+    await fs.unlink(tempWebmPath).catch(() => undefined);
+    await pruneChannelRecordings(sessionId, parsed.data.channelId);
+    const stat = await fs.stat(mp3Path);
+    return res.status(201).json({
+      channelId: parsed.data.channelId,
+      name: `${baseName}.mp3`,
+      size: stat.size,
+      createdAt: stat.birthtime.toISOString()
+    });
+  }
+);
+
+app.get(
+  "/api/admin/sessions/:sessionId/recordings/:channelId/:fileName",
+  requireAuthenticated,
+  requireRoles(["ADMIN", "BROADCASTER", "VIEWER"]),
+  async (req, res) => {
+    const sessionId = String(req.params.sessionId);
+    const channelId = safeRecordingName(String(req.params.channelId));
+    const fileName = safeRecordingName(String(req.params.fileName));
+    if (!fileName.endsWith(".mp3")) {
+      return res.status(400).json({ error: "Invalid file" });
+    }
+    const fullPath = path.join(RECORDINGS_ROOT, safeRecordingName(sessionId), channelId, fileName);
+    try {
+      await fs.access(fullPath);
+      res.setHeader("Content-Type", "audio/mpeg");
+      return res.sendFile(fullPath);
+    } catch {
+      return res.status(404).json({ error: "Recording not found" });
+    }
+  }
+);
+
+app.delete(
+  "/api/admin/sessions/:sessionId/recordings/:channelId/:fileName",
+  requireAuthenticated,
+  requireRoles(["ADMIN", "BROADCASTER"]),
+  async (req, res) => {
+    const sessionId = String(req.params.sessionId);
+    const channelId = safeRecordingName(String(req.params.channelId));
+    const fileName = safeRecordingName(String(req.params.fileName));
+    if (!fileName.endsWith(".mp3")) {
+      return res.status(400).json({ error: "Invalid file" });
+    }
+    const fullPath = path.join(RECORDINGS_ROOT, safeRecordingName(sessionId), channelId, fileName);
+    try {
+      await fs.unlink(fullPath);
+      return res.json({ ok: true });
+    } catch {
+      return res.status(404).json({ error: "Recording not found" });
+    }
+  }
+);
+
+app.get("/api/admin/sessions", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER", "VIEWER"]), async (_req, res) => {
   const sessions = await prisma.session.findMany({
     orderBy: { createdAt: "desc" },
     include: {
@@ -673,7 +1341,7 @@ app.get("/api/admin/sessions", requireAdmin, async (_req, res) => {
   return res.json(withStats);
 });
 
-app.post("/api/admin/sessions", requireAdmin, async (req, res) => {
+app.post("/api/admin/sessions", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (req, res) => {
   const parsed = createSessionSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid payload" });
@@ -703,7 +1371,7 @@ app.post("/api/admin/sessions", requireAdmin, async (req, res) => {
   });
 });
 
-app.get("/api/admin/sessions/:sessionId", requireAdmin, async (req, res) => {
+app.get("/api/admin/sessions/:sessionId", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (req, res) => {
   const sessionId = String(req.params.sessionId);
   let session = await prisma.session.findUnique({ where: { id: sessionId } });
   if (!session) {
@@ -744,7 +1412,7 @@ app.get("/api/admin/sessions/:sessionId", requireAdmin, async (req, res) => {
   });
 });
 
-app.patch("/api/admin/sessions/:sessionId", requireAdmin, async (req, res) => {
+app.patch("/api/admin/sessions/:sessionId", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (req, res) => {
   const sessionId = String(req.params.sessionId);
   const parsed = updateSessionSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -766,7 +1434,7 @@ app.patch("/api/admin/sessions/:sessionId", requireAdmin, async (req, res) => {
   }
 });
 
-app.post("/api/admin/sessions/:sessionId/rotate-code", requireAdmin, async (req, res) => {
+app.post("/api/admin/sessions/:sessionId/rotate-code", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (req, res) => {
   const sessionId = String(req.params.sessionId);
   const session = await prisma.session.findUnique({ where: { id: sessionId } });
   if (!session || session.status !== "ACTIVE") {
@@ -783,7 +1451,7 @@ app.post("/api/admin/sessions/:sessionId/rotate-code", requireAdmin, async (req,
   return res.json({ broadcastCode });
 });
 
-app.get("/api/admin/sessions/:sessionId/stats", requireAdmin, async (req, res) => {
+app.get("/api/admin/sessions/:sessionId/stats", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER", "VIEWER"]), async (req, res) => {
   const sessionId = String(req.params.sessionId);
   const session = await prisma.session.findUnique({ where: { id: sessionId } });
   if (!session) {
@@ -793,7 +1461,7 @@ app.get("/api/admin/sessions/:sessionId/stats", requireAdmin, async (req, res) =
   return res.json({ ...stats, liveChannelIds });
 });
 
-app.get("/api/admin/sessions/:sessionId/analytics", requireAdmin, async (req, res) => {
+app.get("/api/admin/sessions/:sessionId/analytics", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER", "VIEWER"]), async (req, res) => {
   const sessionId = String(req.params.sessionId);
   const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { id: true } });
   if (!session) {
@@ -803,7 +1471,7 @@ app.get("/api/admin/sessions/:sessionId/analytics", requireAdmin, async (req, re
   return res.json(analytics);
 });
 
-app.get("/api/admin/sessions/:sessionId/analytics/export", requireAdmin, async (req, res) => {
+app.get("/api/admin/sessions/:sessionId/analytics/export", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER", "VIEWER"]), async (req, res) => {
   const sessionId = String(req.params.sessionId);
   const format = String(req.query.format ?? "json").toLowerCase();
   const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { id: true, name: true } });
@@ -815,10 +1483,19 @@ app.get("/api/admin/sessions/:sessionId/analytics/export", requireAdmin, async (
   if (format === "csv") {
     const rows: string[] = [];
     rows.push("section,metric,value");
+    rows.push(`post,statsSince,${toCsvValue(analytics.postSession.statsSince)}`);
+    rows.push(`post,joinEvents,${toCsvValue(analytics.postSession.joinEvents)}`);
+    rows.push(`post,leaveEvents,${toCsvValue(analytics.postSession.leaveEvents)}`);
+    rows.push(`post,consumeEvents,${toCsvValue(analytics.postSession.consumeEvents)}`);
+    rows.push(`post,uniqueListeners,${toCsvValue(analytics.postSession.uniqueListeners)}`);
+    rows.push(`post,medianListeningDurationSec,${toCsvValue(analytics.postSession.medianListeningDurationSec.toFixed(2))}`);
+    rows.push(`post,p95ListeningDurationSec,${toCsvValue(analytics.postSession.p95ListeningDurationSec.toFixed(2))}`);
+    rows.push(`post,bounceRate,${toCsvValue(analytics.postSession.bounceRate.toFixed(4))}`);
     rows.push(`live,totalListeners,${toCsvValue(analytics.live.totalListeners)}`);
     rows.push(`live,peakListeners,${toCsvValue(analytics.live.peakListeners)}`);
     rows.push(`live,joinRatePerMin,${toCsvValue(analytics.live.joinRatePerMin.toFixed(2))}`);
     rows.push(`live,leaveRatePerMin,${toCsvValue(analytics.live.leaveRatePerMin.toFixed(2))}`);
+    rows.push(`live,averageListenersLast10Min,${toCsvValue(analytics.live.averageListenersLast10Min.toFixed(2))}`);
     rows.push(`post,averageListeningDurationSec,${toCsvValue(analytics.postSession.averageListeningDurationSec.toFixed(2))}`);
     for (const channel of analytics.postSession.channelComparison) {
       rows.push(`channel,${toCsvValue(channel.name)} joins,${toCsvValue(channel.joins)}`);
@@ -836,7 +1513,7 @@ app.get("/api/admin/sessions/:sessionId/analytics/export", requireAdmin, async (
   return res.send(JSON.stringify(analytics, null, 2));
 });
 
-app.post("/api/admin/sessions/:sessionId/analytics/clear", requireAdmin, async (req, res) => {
+app.post("/api/admin/sessions/:sessionId/analytics/clear", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (req, res) => {
   const sessionId = String(req.params.sessionId);
   const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { id: true } });
   if (!session) {
@@ -844,11 +1521,12 @@ app.post("/api/admin/sessions/:sessionId/analytics/clear", requireAdmin, async (
   }
 
   await prisma.accessLog.deleteMany({ where: { sessionId } });
+  await markSessionStatsSinceNow(sessionId);
   clearSessionAnalyticsState(sessionId);
   return res.json({ ok: true });
 });
 
-app.delete("/api/admin/sessions/:sessionId", requireAdmin, async (req, res) => {
+app.delete("/api/admin/sessions/:sessionId", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (req, res) => {
   const sessionId = String(req.params.sessionId);
   try {
     await prisma.session.delete({ where: { id: sessionId } });
@@ -858,7 +1536,7 @@ app.delete("/api/admin/sessions/:sessionId", requireAdmin, async (req, res) => {
   }
 });
 
-app.post("/api/sessions", requireAdmin, async (req, res) => {
+app.post("/api/sessions", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (req, res) => {
   const parsed = createSessionSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid payload" });
@@ -880,7 +1558,7 @@ app.post("/api/sessions", requireAdmin, async (req, res) => {
   return res.status(201).json({ ...session, broadcastCode });
 });
 
-app.post("/api/sessions/:sessionId/channels", requireAdmin, async (req, res) => {
+app.post("/api/sessions/:sessionId/channels", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (req, res) => {
   const sessionId = String(req.params.sessionId);
   const parsed = createChannelSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -913,7 +1591,7 @@ app.get("/api/sessions/:sessionId/channels", async (req, res) => {
   return res.json(channels);
 });
 
-app.delete("/api/sessions/:sessionId/channels/:channelId", requireAdmin, async (req, res) => {
+app.delete("/api/sessions/:sessionId/channels/:channelId", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (req, res) => {
   const sessionId = String(req.params.sessionId);
   const channelId = String(req.params.channelId);
 
@@ -927,7 +1605,7 @@ app.delete("/api/sessions/:sessionId/channels/:channelId", requireAdmin, async (
   return res.json({ ok: true });
 });
 
-app.post("/api/sessions/:sessionId/join-link", requireAdmin, async (req, res) => {
+app.post("/api/sessions/:sessionId/join-link", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (req, res) => {
   const sessionId = String(req.params.sessionId);
   const parsed = createJoinLinkSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -1043,13 +1721,24 @@ io.use(async (socket, next) => {
 
 io.on("connection", (socket) => {
   const auth = socket.data.auth as SocketAuthPayload;
+  const socketIp = socket.handshake.address || null;
+  const socketUserAgentHeader = socket.handshake.headers["user-agent"];
+  const socketUserAgent = typeof socketUserAgentHeader === "string" ? socketUserAgentHeader : null;
   socket.join(`session:${auth.sessionId}`);
   if (auth.role === "LISTENER") {
     addSocketToRoleMap(listenerSocketsBySession, auth.sessionId, socket.id);
     listenerStateBySocket.set(socket.id, { sessionId: auth.sessionId });
     recordLiveSnapshot(auth.sessionId);
   } else {
+    const hadBroadcaster = (broadcasterSocketsBySession.get(auth.sessionId)?.size ?? 0) > 0;
     addSocketToRoleMap(broadcasterSocketsBySession, auth.sessionId, socket.id);
+    if (!hadBroadcaster) {
+      void (async () => {
+        await markSessionStatsSinceNow(auth.sessionId);
+        await prisma.accessLog.deleteMany({ where: { sessionId: auth.sessionId } });
+        clearSessionAnalyticsState(auth.sessionId);
+      })().catch(() => undefined);
+    }
   }
 
   socket.on("disconnect", () => {
@@ -1065,7 +1754,9 @@ io.on("connection", (socket) => {
               channelId: state.channelId,
               eventType: "LISTENER_LEAVE",
               success: true,
-              reason: `durationMs=${durationMs}`
+              reason: `durationMs=${durationMs}`,
+              ip: socketIp,
+              userAgent: socketUserAgent
             }
           })
           .catch(() => {});
@@ -1108,7 +1799,9 @@ io.on("connection", (socket) => {
               channelId: state.channelId,
               eventType: "LISTENER_LEAVE",
               success: true,
-              reason: `durationMs=${durationMs}`
+              reason: `durationMs=${durationMs}`,
+              ip: socketIp,
+              userAgent: socketUserAgent
             }
           })
           .catch(() => {});
@@ -1132,7 +1825,9 @@ io.on("connection", (socket) => {
             sessionId: auth.sessionId,
             channelId,
             eventType: "LISTENER_JOIN",
-            success: true
+            success: true,
+            ip: socketIp,
+            userAgent: socketUserAgent
           }
         })
         .catch(() => {});
@@ -1240,7 +1935,9 @@ io.on("connection", (socket) => {
             sessionId: auth.sessionId,
             channelId,
             eventType: "LISTENER_CONSUME",
-            success: true
+            success: true,
+            ip: socketIp,
+            userAgent: socketUserAgent
           }
         })
         .catch(() => {});

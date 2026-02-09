@@ -1,0 +1,4 @@
+interface:
+  display_name: "Oracle SSH Access"
+  short_description: "Sichere SSH-Verbindung zu Oracle-Servern mit Key"
+  default_prompt: "Verbinde dich per SSH zu meinem Oracle-Server und führe sichere Basis-Checks aus."

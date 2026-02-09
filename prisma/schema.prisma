@@ -9,7 +9,7 @@ datasource db {
 
 enum Role {
   BROADCASTER
-  LISTENER
+  VIEWER
   ADMIN
 }
 
@@ -20,10 +20,13 @@ enum SessionStatus {
 
 model User {
   id        String   @id @default(cuid())
+  name      String   @unique
   email     String   @unique
+  passwordHash String
   role      Role
   createdAt DateTime @default(now())
   sessions  Session[]
+  templates SessionTemplate[]
 }
 
 model Session {
@@ -44,6 +47,32 @@ model Session {
   accessLogs      AccessLog[]
 
   @@index([status, createdAt])
+}
+
+model SessionTemplate {
+  id            String            @id @default(cuid())
+  name          String
+  description   String?
+  imageUrl      String?
+  createdById   String?
+  createdBy     User?             @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  channels      TemplateChannel[]
+
+  @@index([createdAt])
+}
+
+model TemplateChannel {
+  id          String          @id @default(cuid())
+  templateId  String
+  template    SessionTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  name        String
+  languageCode String?
+  orderIndex  Int             @default(0)
+  createdAt   DateTime        @default(now())
+
+  @@index([templateId, orderIndex])
 }
 
 model Channel {
