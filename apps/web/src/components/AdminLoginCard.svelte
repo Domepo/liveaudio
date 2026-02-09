@@ -18,5 +18,7 @@
   <label for="admin-password" class="mt-6 block text-xs font-bold uppercase tracking-wide text-slate-500">Passwort</label>
   <input id="admin-password" class="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-800" type="password" bind:value={adminPassword} placeholder="Admin Passwort" />
   <button class="mt-4 w-full rounded-xl bg-orange-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-orange-600 disabled:opacity-60" onclick={() => dispatch("login")} disabled={!canLogin}>Anmelden</button>
-  <p class="mt-3 text-sm text-slate-600 dark:text-slate-300">{adminStatus}</p>
+  {#if adminStatus}
+    <p class="mt-3 text-sm text-slate-600 dark:text-slate-300">{adminStatus}</p>
+  {/if}
 </section>

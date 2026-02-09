@@ -5,6 +5,8 @@ dist
 .env
 .env.local
 coverage
+test-results
+playwright-report
 *.tsbuildinfo
 prisma/dev.db
 prisma/dev.db-shm

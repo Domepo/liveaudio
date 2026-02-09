@@ -4,7 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@prisma/client": "^6.3.1",
@@ -27,8 +30,11 @@
     "@types/jsonwebtoken": "^9.0.8",
     "@types/morgan": "^1.9.9",
     "@types/node": "^22.10.5",
+    "@types/supertest": "^6.0.3",
     "prisma": "^6.3.1",
+    "supertest": "^7.1.0",
     "ts-node-dev": "^2.0.0",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
   }
 }

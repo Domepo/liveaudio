@@ -44,6 +44,34 @@ Hinweis:
 npm run dev:docker
 ```
 
+## Testing
+
+Das Projekt hat jetzt drei Testebenen:
+
+- API Integration/Unit: `vitest` + `supertest`
+- Web Component Tests: `vitest` + `@testing-library/svelte`
+- E2E Smoke: `playwright`
+
+Schnellbefehle:
+
+```bash
+# API + Web Tests
+npm run test:unit
+
+# E2E (baut API+Web vorher automatisch)
+npm run test:e2e
+
+# Alles
+npm test
+```
+
+Hinweise:
+
+- Vor den Tests sollte die lokale SQLite-DB initialisiert sein:
+  - `npm run db:init`
+- Für E2E muss einmalig ein Browser installiert werden:
+  - `npx playwright install chromium`
+
 ## MVP-Flow
 
 1. Im Bereich **Admin** mit Name + Passwort anmelden (Default lokal: `admin` / `test`, sofern kein Admin-Benutzer angelegt wurde).

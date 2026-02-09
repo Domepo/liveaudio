@@ -12,6 +12,12 @@
     "dev:media": "npm run dev -w @livevoice/media",
     "dev:web": "npm run dev -w @livevoice/web",
     "build": "npm run build -ws",
+    "test": "npm run test:unit && npm run test:e2e",
+    "test:unit": "npm run test -w @livevoice/api && npm run test -w @livevoice/web",
+    "test:e2e:prepare": "npm run build -w @livevoice/api && npm run build -w @livevoice/web",
+    "start:test:api": "npm run start -w @livevoice/api",
+    "start:test:web": "npm run preview -w @livevoice/web -- --host 127.0.0.1 --port 4173",
+    "test:e2e": "npm run test:e2e:prepare && playwright test",
     "db:init": "./scripts/init-sqlite.sh",
     "prisma:generate": "npx prisma generate",
     "prisma:push": "npx prisma db push --schema=prisma/schema.prisma",
@@ -20,6 +26,7 @@
     "prisma:migrate": "npx prisma migrate dev"
   },
   "devDependencies": {
+    "@playwright/test": "^1.51.1",
     "concurrently": "^9.2.1"
   }
 }

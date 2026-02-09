@@ -31,12 +31,15 @@ const io = new Server(server, {
 
 const API_PORT = Number(process.env.API_PORT ?? 3000);
 const API_HOST = process.env.API_HOST ?? "0.0.0.0";
+const IS_TEST_ENV = process.env.NODE_ENV === "test";
 const JWT_SECRET = process.env.JWT_SECRET ?? "dev-secret";
 const ADMIN_SESSION_COOKIE = "admin_session";
 const ADMIN_LOGIN_NAME = process.env.ADMIN_LOGIN_NAME ?? "admin";
 const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH ?? "$2a$12$CBpEnaQBlvvAY/Z.kqa/JOCAawr.Hdn48.x44Vae4DuyEklXWm0ea"; // "test"
 const ADMIN_LOGIN_NAME_CONFIG_KEY = "ADMIN_LOGIN_NAME";
 const ADMIN_PASSWORD_CONFIG_KEY = "ADMIN_PASSWORD_HASH";
+const APP_LOGO_CONFIG_KEY = "APP_LOGO_DATA_URL";
+const DEFAULT_APP_LOGO_URL = "/logo.svg";
 const MEDIA_BASE_URL = process.env.MEDIA_BASE_URL ?? "http://localhost:4000";
 const SESSION_STATS_SINCE_PREFIX = "SESSION_STATS_SINCE:";
 const RECORDINGS_ROOT = path.join(process.cwd(), "recordings");
@@ -63,7 +66,7 @@ app.use(
 app.use(helmet());
 app.use(express.json());
 app.use(morgan("combined"));
-app.set("trust proxy", true);
+app.set("trust proxy", IS_TEST_ENV ? false : true);
 
 // Proxy-compat layer:
 // Some reverse proxies forward "/api/foo" as "/foo".
@@ -292,19 +295,6 @@ const createAdminUserSchema = z.object({
   password: z.string().min(6).max(200),
   role: z.nativeEnum(Role)
 });
-const templateChannelSchema = z.object({
-  name: z.string().trim().min(1).max(50),
-  languageCode: z.string().trim().max(8).optional()
-});
-const createTemplateSchema = z.object({
-  name: z.string().trim().min(2).max(100),
-  description: z.string().max(2000).optional(),
-  imageUrl: z.string().max(1_000_000).optional(),
-  channels: z.array(templateChannelSchema).max(20).default([])
-});
-const createSessionFromTemplateSchema = z.object({
-  name: z.string().trim().min(2).max(100).optional()
-});
 const createRecordingSchema = z.object({
   channelId: z.string().min(1).max(100),
   dataUrl: z.string().min(10)
@@ -327,6 +317,14 @@ const updateSessionSchema = z.object({
   name: z.string().min(2).max(100).optional(),
   description: z.string().max(2000).optional(),
   imageUrl: z.string().max(1_000_000).optional()
+});
+const updateAppLogoSchema = z.object({
+  logoDataUrl: z
+    .string()
+    .trim()
+    .max(1_000_000)
+    .refine((value) => value.startsWith("data:image/"), { message: "Invalid logo format" })
+    .nullable()
 });
 
 function addSocketToRoleMap(map: Map<string, Set<string>>, sessionId: string, socketId: string): void {
@@ -407,6 +405,22 @@ async function getEffectiveAdminLoginName(): Promise<string> {
     select: { value: true }
   });
   return (config?.value ?? ADMIN_LOGIN_NAME).trim();
+}
+
+async function getAppLogoBranding(): Promise<{ logoUrl: string; version: string }> {
+  const config = await prisma.appConfig.findUnique({
+    where: { key: APP_LOGO_CONFIG_KEY },
+    select: { value: true, updatedAt: true }
+  });
+
+  if (!config?.value) {
+    return { logoUrl: DEFAULT_APP_LOGO_URL, version: "default" };
+  }
+
+  return {
+    logoUrl: config.value,
+    version: String(config.updatedAt.getTime())
+  };
 }
 
 function normalizeForLookup(value: string): string {
@@ -801,15 +815,17 @@ app.get("/health", async (_req, res) => {
   res.json({ ok: true, sessions, channels });
 });
 
-setInterval(() => {
-  const sessionIds = new Set<string>([
-    ...Array.from(listenerSocketsBySession.keys()),
-    ...Array.from(liveListenerCountsBySessionChannel.keys())
-  ]);
-  for (const sessionId of sessionIds) {
-    recordLiveSnapshot(sessionId);
-  }
-}, 5000);
+if (!IS_TEST_ENV) {
+  setInterval(() => {
+    const sessionIds = new Set<string>([
+      ...Array.from(listenerSocketsBySession.keys()),
+      ...Array.from(liveListenerCountsBySessionChannel.keys())
+    ]);
+    for (const sessionId of sessionIds) {
+      recordLiveSnapshot(sessionId);
+    }
+  }, 5000);
+}
 
 app.get("/api/network", (req, res) => {
   const reqHost = req.get("host") ?? "";
@@ -820,6 +836,12 @@ app.get("/api/network", (req, res) => {
   const suggestedJoinBaseUrl = `http://${lanIp}${useDefaultPort ? "" : `:${webPort}`}`;
   const currentHostJoinBaseUrl = `http://${reqHostname}${useDefaultPort ? "" : `:${webPort}`}`;
   res.json({ lanIp, suggestedJoinBaseUrl, currentHostJoinBaseUrl });
+});
+
+app.get("/api/public/branding", async (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  const branding = await getAppLogoBranding();
+  return res.json(branding);
 });
 
 app.get("/api/public/sessions/:sessionId", async (req, res) => {
@@ -935,6 +957,33 @@ app.post("/api/admin/login", adminLoginLimiter, async (req, res) => {
 app.post("/api/admin/logout", (_req, res) => {
   clearAdminCookie(res);
   return res.json({ ok: true });
+});
+
+app.put("/api/admin/settings/logo", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (req, res) => {
+  const parsed = updateAppLogoSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid payload" });
+  }
+
+  if (!parsed.data.logoDataUrl) {
+    await prisma.appConfig.deleteMany({
+      where: { key: APP_LOGO_CONFIG_KEY }
+    });
+    return res.json({ ok: true, logoUrl: DEFAULT_APP_LOGO_URL, version: "default" });
+  }
+
+  const stored = await prisma.appConfig.upsert({
+    where: { key: APP_LOGO_CONFIG_KEY },
+    create: { key: APP_LOGO_CONFIG_KEY, value: parsed.data.logoDataUrl },
+    update: { value: parsed.data.logoDataUrl },
+    select: { updatedAt: true }
+  });
+
+  return res.json({
+    ok: true,
+    logoUrl: parsed.data.logoDataUrl,
+    version: String(stored.updatedAt.getTime())
+  });
 });
 
 app.get("/api/admin/me", requireAuthenticated, (req, res) => {
@@ -1091,113 +1140,6 @@ app.patch("/api/admin/users/:userId", requireAuthenticated, requireRoles(["ADMIN
 
   return res.json(updated);
 });
-
-app.get("/api/admin/templates", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (_req, res) => {
-  const templates = await prisma.sessionTemplate.findMany({
-    orderBy: { createdAt: "desc" },
-    include: {
-      channels: {
-        orderBy: { orderIndex: "asc" },
-        select: { id: true, name: true, languageCode: true, orderIndex: true }
-      }
-    }
-  });
-  return res.json(templates);
-});
-
-app.post("/api/admin/templates", requireAuthenticated, requireRoles(["ADMIN", "BROADCASTER"]), async (req, res) => {
-  const parsed = createTemplateSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: "Invalid payload" });
-  }
-  const auth = (req as AdminRequest).admin;
-  const template = await prisma.sessionTemplate.create({
-    data: {
-      name: parsed.data.name.trim(),
-      description: parsed.data.description,
-      imageUrl: parsed.data.imageUrl,
-      createdById: auth?.userId,
-      channels: {
-        create: parsed.data.channels.map((channel, index) => ({
-          name: channel.name.trim(),
-          languageCode: channel.languageCode?.trim() || undefined,
-          orderIndex: index
-        }))
-      }
-    },
-    include: {
-      channels: {
-        orderBy: { orderIndex: "asc" },
-        select: { id: true, name: true, languageCode: true, orderIndex: true }
-      }
-    }
-  });
-  return res.status(201).json(template);
-});
-
-app.post(
-  "/api/admin/templates/:templateId/create-session",
-  requireAuthenticated,
-  requireRoles(["ADMIN", "BROADCASTER"]),
-  async (req, res) => {
-    const parsed = createSessionFromTemplateSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return res.status(400).json({ error: "Invalid payload" });
-    }
-
-    const templateId = String(req.params.templateId);
-    const template = await prisma.sessionTemplate.findUnique({
-      where: { id: templateId },
-      include: { channels: { orderBy: { orderIndex: "asc" } } }
-    });
-    if (!template) {
-      return res.status(404).json({ error: "Template not found" });
-    }
-
-    const broadcastCode = await generateUniqueSessionCode();
-    const broadcastCodeHash = await bcrypt.hash(broadcastCode, 10);
-    const session = await prisma.session.create({
-      data: {
-        name: parsed.data.name?.trim() || template.name,
-        description: template.description,
-        imageUrl: template.imageUrl,
-        broadcastCode,
-        broadcastCodeHash,
-        channels: {
-          create: template.channels.map((channel) => ({
-            name: channel.name,
-            languageCode: channel.languageCode
-          }))
-        }
-      }
-    });
-
-    return res.status(201).json({
-      id: session.id,
-      name: session.name,
-      description: session.description,
-      imageUrl: session.imageUrl,
-      status: session.status,
-      createdAt: session.createdAt,
-      broadcastCode
-    });
-  }
-);
-
-app.delete(
-  "/api/admin/templates/:templateId",
-  requireAuthenticated,
-  requireRoles(["ADMIN", "BROADCASTER"]),
-  async (req, res) => {
-    const templateId = String(req.params.templateId);
-    try {
-      await prisma.sessionTemplate.delete({ where: { id: templateId } });
-      return res.json({ ok: true });
-    } catch {
-      return res.status(404).json({ error: "Template not found" });
-    }
-  }
-);
 
 app.get(
   "/api/admin/sessions/:sessionId/recordings",
@@ -1957,7 +1899,15 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(API_PORT, API_HOST, () => {
-  // eslint-disable-next-line no-console
-  console.log(`API listening on ${API_HOST}:${API_PORT}`);
-});
+function startServer(): void {
+  server.listen(API_PORT, API_HOST, () => {
+    // eslint-disable-next-line no-console
+    console.log(`API listening on ${API_HOST}:${API_PORT}`);
+  });
+}
+
+if (!IS_TEST_ENV) {
+  startServer();
+}
+
+export { app, server, prisma, startServer };
