@@ -1,0 +1,4 @@
+interface:
+  display_name: "Oracle LiveAudio Deploy"
+  short_description: "Sync liveaudio and rebuild stack-apps compose"
+  default_prompt: "Use $oracle-liveaudio-deploy to sync liveaudio to Oracle and rebuild stack-apps via docker compose."
