@@ -9,6 +9,11 @@ description: Deploye LiveAudio auf den Oracle-Server per SSH ohne GitHub-Zugriff
 
 Fuehre einen reproduzierbaren Deploy auf dem Oracle-Server aus: lokalen Code per SSH-Dateiuebertragung (`rsync`, aehnlich zu `scp`) in das Zielverzeichnis kopieren und danach im Compose-Verzeichnis `sudo docker compose up -d --build` starten.
 
+Branch-Kopplung ist aktiv:
+
+- `main`/`master` -> Stack `prod` (`liveaudio` -> `livevoice-*` Services)
+- `dev`/`develop` -> Stack `dev` (`liveaudio-dev` -> `livevoice-dev-*` Services)
+
 ## Workflow
 
 1. Pruefe lokal, ob dein Workspace den gewuenschten Stand hat.
@@ -20,6 +25,12 @@ Fuehre einen reproduzierbaren Deploy auf dem Oracle-Server aus: lokalen Code per
 
 - Standard-Deploy:
   - `bash scripts/deploy_liveaudio.sh`
+- Explizit auf Prod-Stack (unabhaengig vom Branch):
+  - `TARGET_STACK=prod bash scripts/deploy_liveaudio.sh`
+- Explizit auf Dev-Stack (unabhaengig vom Branch):
+  - `TARGET_STACK=dev bash scripts/deploy_liveaudio.sh`
+- Optional komplettes Compose statt nur LiveAudio-Services:
+  - `FORCE_FULL_COMPOSE_UP=1 bash scripts/deploy_liveaudio.sh`
 - Deploy mit anderem lokalen Quellordner:
   - `LOCAL_SOURCE_DIR=/pfad/zum/liveaudio bash scripts/deploy_liveaudio.sh`
 - Deploy auf anderem SSH-Host-Alias:
@@ -27,10 +38,11 @@ Fuehre einen reproduzierbaren Deploy auf dem Oracle-Server aus: lokalen Code per
 
 ## Required Paths On Server
 
-- Repository-Ziel: `/home/freeserver/compose/stack-apps/github/liveaudio`
+- Repository-Ziel (prod): `/home/freeserver/compose/stack-apps/github/liveaudio`
+- Repository-Ziel (dev): `/home/freeserver/compose/stack-apps/github/liveaudio-dev`
 - Compose-Verzeichnis: `/home/freeserver/compose/stack-apps`
 
-Das Script erstellt das Zielverzeichnis bei Bedarf und synchronisiert den kompletten lokalen Projektstand nach remote (mit Excludes fuer `.git`, `node_modules`, `test-results`, `playwright-report`).
+Das Script erstellt das Zielverzeichnis bei Bedarf und synchronisiert den kompletten lokalen Projektstand nach remote (mit Excludes fuer `.git`, `node_modules`, `test-results`, `playwright-report`). Anschliessend werden nur die Services des gekoppelten Stacks neu gebaut.
 
 ## Safety Rules
 

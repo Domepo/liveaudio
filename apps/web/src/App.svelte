@@ -90,17 +90,38 @@
     logoUrl: string;
     version: string;
   };
-
   function runtimeApiUrl(): string {
-    if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL;
-    if (typeof window === "undefined") return "http://localhost:3000";
-    return `${window.location.protocol}//${window.location.hostname}:3000`;
+    if (typeof window === "undefined") return import.meta.env.VITE_API_URL || "http://localhost:3000";
+    const envUrl = import.meta.env.VITE_API_URL?.trim();
+    if (envUrl) {
+      try {
+        const parsed = new URL(envUrl);
+        const isLocalHost = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+        if (parsed.hostname === window.location.hostname || isLocalHost) {
+          return envUrl;
+        }
+      } catch {
+        // Ignore invalid env URL and fall back to same-origin.
+      }
+    }
+    return window.location.origin;
   }
 
   function runtimeWsUrl(): string {
-    if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
-    if (typeof window === "undefined") return "http://localhost:3000";
-    return `${window.location.protocol}//${window.location.hostname}:3000`;
+    if (typeof window === "undefined") return import.meta.env.VITE_WS_URL || "http://localhost:3000";
+    const envUrl = import.meta.env.VITE_WS_URL?.trim();
+    if (envUrl) {
+      try {
+        const parsed = new URL(envUrl);
+        const isLocalHost = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+        if (parsed.hostname === window.location.hostname || isLocalHost) {
+          return envUrl;
+        }
+      } catch {
+        // Ignore invalid env URL and fall back to same-origin.
+      }
+    }
+    return window.location.origin;
   }
 
   const apiUrl = runtimeApiUrl();
