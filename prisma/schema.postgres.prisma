@@ -1,0 +1,172 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  BROADCASTER
+  VIEWER
+  ADMIN
+}
+
+enum SessionStatus {
+  ACTIVE
+  ENDED
+}
+
+model User {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  email     String   @unique
+  passwordHash String
+  mustChangePassword Boolean @default(false)
+  role      Role
+  createdAt DateTime @default(now())
+  sessions  Session[] @relation("SessionCreatedBy")
+  sessionAccesses SessionUserAccess[]
+  templates SessionTemplate[]
+}
+
+model Session {
+  id              String        @id @default(cuid())
+  name            String
+  description     String?
+  imageUrl        String?
+  broadcastCode   String?       @unique
+  broadcastCodeHash String?
+  status          SessionStatus @default(ACTIVE)
+  createdByUserId String?
+  createdByUser   User?         @relation("SessionCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  startedAt       DateTime      @default(now())
+  endedAt         DateTime?
+  createdAt       DateTime      @default(now())
+  userAccesses    SessionUserAccess[]
+  channels        Channel[]
+  joinTokens      JoinToken[]
+  accessLogs      AccessLog[]
+  analyticsPoints AnalyticsPoint[]
+
+  @@index([status, createdAt])
+}
+
+model SessionUserAccess {
+  id        String   @id @default(cuid())
+  sessionId String
+  userId    String
+  createdAt DateTime @default(now())
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, userId])
+  @@index([userId, sessionId])
+}
+
+model SessionTemplate {
+  id            String            @id @default(cuid())
+  name          String
+  description   String?
+  imageUrl      String?
+  createdById   String?
+  createdBy     User?             @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  channels      TemplateChannel[]
+
+  @@index([createdAt])
+}
+
+model TemplateChannel {
+  id           String          @id @default(cuid())
+  templateId   String
+  template     SessionTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  name         String
+  languageCode String?
+  orderIndex   Int             @default(0)
+  createdAt    DateTime        @default(now())
+
+  @@index([templateId, orderIndex])
+}
+
+model Channel {
+  id           String      @id @default(cuid())
+  sessionId    String
+  session      Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  name         String
+  languageCode String?
+  isActive     Boolean     @default(true)
+  createdAt    DateTime    @default(now())
+  joinTokens   JoinToken[]
+  accessLogs   AccessLog[]
+  analyticsPoints AnalyticsPoint[]
+
+  @@unique([sessionId, name])
+  @@index([sessionId, isActive])
+}
+
+model AnalyticsPoint {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  channelId String?
+  channel   Channel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  metric    String
+  value     Float
+  ts        DateTime
+  createdAt DateTime @default(now())
+
+  @@index([sessionId, ts])
+  @@index([metric, ts])
+  @@index([channelId, ts])
+}
+
+model JoinToken {
+  id         String     @id @default(cuid())
+  sessionId  String
+  session    Session    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  channelId  String?
+  channel    Channel?   @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  tokenHash  String     @unique
+  pinHash    String
+  pinLast4   String
+  expiresAt  DateTime
+  maxUses    Int?
+  usedCount  Int        @default(0)
+  rotates    Boolean    @default(false)
+  revokedAt  DateTime?
+  createdAt  DateTime   @default(now())
+  accessLogs AccessLog[]
+
+  @@index([sessionId, expiresAt])
+  @@index([channelId, expiresAt])
+  @@index([revokedAt])
+}
+
+model AccessLog {
+  id          String     @id @default(cuid())
+  sessionId   String
+  session     Session    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  channelId   String?
+  channel     Channel?   @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  joinTokenId String?
+  joinToken   JoinToken? @relation(fields: [joinTokenId], references: [id], onDelete: SetNull)
+  ip          String?
+  userAgent   String?
+  eventType   String
+  success     Boolean
+  reason      String?
+  createdAt   DateTime   @default(now())
+
+  @@index([sessionId, createdAt])
+  @@index([ip, createdAt])
+}
+
+model AppConfig {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+}

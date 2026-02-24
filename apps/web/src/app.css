@@ -1,0 +1,226 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: "Space Grotesk", "IBM Plex Sans", system-ui, sans-serif;
+}
+
+body {
+  @apply min-h-screen bg-white text-ink antialiased transition-colors duration-300 dark:bg-slate-950 dark:text-slate-100;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Mobile-only admin tweaks. Keep desktop unchanged by scoping to max-width and `.lv-admin`. */
+@media (max-width: 1024px) {
+  .lv-admin .lv-admin-dashboard-wrap {
+    padding-top: 0 !important;
+  }
+
+  .lv-admin .lv-header-inner {
+    padding-left: 16px !important;
+    padding-right: 16px !important;
+  }
+
+  .lv-admin .lv-page-inner {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    padding-top: 20px !important;
+    padding-bottom: 24px !important;
+  }
+
+  .lv-admin .lv-header-left {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  /* Header burger: only on mobile admin dashboard. */
+  .lv-admin .lv-admin-burger {
+    display: grid !important;
+  }
+
+  /* Hide the desktop-like sidebar menu on mobile; burger drawer replaces it. */
+  .lv-admin .lv-admin-menu {
+    display: none !important;
+  }
+
+  /* Disable sticky sidebars on mobile to prevent awkward scroll traps. */
+  .lv-admin .lv-admin-sidebar {
+    position: static !important;
+    top: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+  }
+
+  .lv-admin .lv-admin-detail-grid > * {
+    min-width: 0 !important;
+  }
+
+  .lv-admin .lv-admin-drawer {
+    border-top-right-radius: 24px;
+    border-bottom-right-radius: 24px;
+  }
+
+  /* Stats view: reduce sticky/header friction and improve small-screen layout. */
+  .lv-admin .lv-admin-stats-header {
+    position: static !important;
+    top: auto !important;
+  }
+
+  .lv-admin .lv-admin-stats-controls {
+    grid-template-columns: 1fr !important;
+  }
+
+  .lv-admin .lv-admin-stats-toolbar {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+
+  .lv-admin .lv-admin-stats-presets {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .lv-admin .lv-admin-stats-sessions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  /* KPI cards: switch from horizontal scroll to vertical stack on mobile. */
+  .lv-admin .lv-admin-stats-kpis .no-scrollbar {
+    overflow: visible !important;
+  }
+
+  .lv-admin .lv-admin-stats-kpis .inline-flex {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    min-width: 0 !important;
+  }
+
+  .lv-admin .lv-admin-stats-kpis article {
+    width: 100% !important;
+  }
+
+  /* Ranking table: make it readable without horizontal scrolling. */
+  .lv-admin .lv-admin-stats-ranking .overflow-auto {
+    overflow: visible !important;
+  }
+
+  .lv-admin .lv-admin-stats-ranking table,
+  .lv-admin .lv-admin-stats-ranking thead,
+  .lv-admin .lv-admin-stats-ranking tbody,
+  .lv-admin .lv-admin-stats-ranking th,
+  .lv-admin .lv-admin-stats-ranking td,
+  .lv-admin .lv-admin-stats-ranking tr {
+    display: block;
+    width: 100%;
+  }
+
+  .lv-admin .lv-admin-stats-ranking thead {
+    display: none;
+  }
+
+  .lv-admin .lv-admin-stats-ranking tr {
+    border-top: 0 !important;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 16px;
+    padding: 10px 12px;
+    margin-top: 10px;
+  }
+
+  .lv-admin .lv-admin-stats-ranking td {
+    padding: 4px 0 !important;
+  }
+
+  .lv-admin .lv-admin-stats-ranking td:first-child {
+    font-weight: 800;
+  }
+
+  /* iOS Safari: prevent input-focus zoom */
+  .lv-admin input,
+  .lv-admin textarea,
+  .lv-admin select {
+    font-size: 16px !important;
+  }
+
+  /* Token row: stack input + button */
+  .lv-admin .lv-admin-token-row {
+    flex-direction: column !important;
+  }
+
+  .lv-admin .lv-admin-token-row > * {
+    width: 100%;
+  }
+
+  .lv-admin .lv-admin-token-row button {
+    min-height: 44px;
+  }
+
+  /* Device buttons: one column, touch-friendly */
+  .lv-admin .lv-admin-device-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  .lv-admin .lv-admin-device-grid > button {
+    min-height: 44px;
+  }
+
+  /* Settings actions: stack buttons */
+  .lv-admin .lv-admin-actions-row {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+
+  .lv-admin .lv-admin-actions-row > button {
+    width: 100%;
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 420px) {
+  /* (Reserved for extra-tight tweaks) */
+}
+
+/* iPad/tablet touch devices: use mobile-like admin navigation even in landscape widths. */
+@media (hover: none) and (pointer: coarse) and (max-width: 1299px) {
+  .lv-admin .lv-admin-dashboard-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .lv-admin .lv-admin-menu {
+    display: none !important;
+  }
+
+  .lv-admin .lv-admin-burger {
+    display: grid !important;
+  }
+
+  .lv-admin .lv-header-lang-desktop {
+    display: none !important;
+  }
+
+  .lv-admin .lv-header-lang-mobile {
+    display: block !important;
+  }
+
+  .lv-admin .lv-header-logout {
+    display: none !important;
+  }
+
+  .lv-admin .lv-session-top-stats {
+    display: none !important;
+  }
+}

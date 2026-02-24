@@ -1,0 +1,17 @@
+node_modules
+npm-debug.log*
+.DS_Store
+dist
+.env
+.env.local
+coverage
+test-results
+playwright-report
+*.tsbuildinfo
+prisma/dev.db
+prisma/dev.db-shm
+prisma/dev.db-wal
+apps/api/recordings/*
+logs/
+.skills/
+plan/

@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: livevoice-postgres
+    environment:
+      POSTGRES_DB: livevoice
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d livevoice"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.app
+    container_name: livevoice-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_DB: livevoice
+      POSTGRES_PASSWORD: postgres
+      API_PORT: 3001
+      API_HOST: 0.0.0.0
+      MEDIA_PORT: 4000
+      MEDIA_LISTEN_IP: 0.0.0.0
+      MEDIA_ANNOUNCED_IP: 127.0.0.1
+      RTC_MIN_PORT: 40000
+      RTC_MAX_PORT: 42000
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/livevoice?schema=public
+      JWT_SECRET: change-me
+      JWT_ISSUER: liveaudio-api
+      TRUST_PROXY: false
+      MEDIA_BASE_URL: http://127.0.0.1:4000
+      MEDIA_INTERNAL_TOKEN: change-me-very-long-random-token
+      JOIN_TOKEN_TTL_MINUTES: 15
+      PIN_MAX_ATTEMPTS: 6
+    ports:
+      - "5173:5173"
+      - "3001:3001"
+      - "40000-42000:40000-42000/udp"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:3001/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
