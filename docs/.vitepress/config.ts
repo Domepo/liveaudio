@@ -1,6 +1,6 @@
-const config = {
+﻿const config = {
   title: "LiveAudio Docs",
-  description: "Technische Dokumentation für Entwicklung, Betrieb und Deployment von LiveAudio.",
+  description: "Technische Dokumentation f\u00fcr Entwicklung, Betrieb und Deployment von LiveAudio.",
   base: process.env.GITHUB_ACTIONS ? "/liveaudio/" : "/",
   lang: "de-DE",
   cleanUrls: true,
@@ -22,7 +22,7 @@ const config = {
       {
         text: "Grundlagen",
         items: [
-          { text: "Übersicht", link: "/" },
+          { text: "\u00dcbersicht", link: "/" },
           { text: "Getting Started", link: "/getting-started" },
           { text: "Entwicklung", link: "/development" }
         ]
@@ -32,7 +32,7 @@ const config = {
         items: [
           { text: "Architektur", link: "/architecture" },
           { text: "Konfiguration", link: "/configuration" },
-          { text: "API Übersicht", link: "/api-overview" }
+          { text: "API \u00dcbersicht", link: "/api-overview" }
         ]
       },
       {

@@ -35,6 +35,7 @@
     placeholder={$t("login.admin_password_placeholder")}
   />
   <button
+    id="admin-login-submit"
     class="mt-4 w-full rounded-xl bg-orange-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-orange-600 disabled:opacity-60"
     onclick={() => dispatch("login")}
     disabled={!canLogin || isLoggingIn}
