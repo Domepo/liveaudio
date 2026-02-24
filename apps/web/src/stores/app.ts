@@ -223,7 +223,7 @@ const defaultState: AppState = {
   listenerMediaSessionPlaybackState: "none",
   listenerTelemetryEvents: [],
 
-  appLogoUrl: "/logo.svg",
+  appLogoUrl: "/logo.png",
   settingsStatus: "",
   settingsAutoRefreshSeconds: 5,
   settingsAutoGenerateQr: true,

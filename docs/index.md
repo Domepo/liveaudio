@@ -1,4 +1,6 @@
-﻿# LiveAudio Dokumentation
+# LiveAudio Dokumentation
+
+![LiveAudio Logo](/assets/icon.png)
 
 Diese VitePress-Dokumentation beschreibt den gesamten technischen Rahmen von LiveAudio:
 
@@ -7,6 +9,25 @@ Diese VitePress-Dokumentation beschreibt den gesamten technischen Rahmen von Liv
 - Konfiguration und Security-Hardening
 - Deployment und Betrieb
 - Teststrategie und Fehlersuche
+
+## Screenshots
+
+### Dashboard
+
+![Dashboard](/assets/dashboard.png)
+
+### Statistik
+
+![Statistik](/assets/statistics.png)
+
+### Live Speak Ansicht
+
+![Speak Live Dashboard](/assets/speak_live_dashboard.png)
+
+### Listener
+
+![Client Join](/assets/client_view_join.png)
+![Client View](/assets/client_view.png)
 
 ## Zielgruppe
 
@@ -55,5 +76,3 @@ docs/         VitePress-Doku + Planungsdokumente
   - Update in `configuration.md` (neue ENV-Variablen)
   - Update in `testing.md` (Regression/Szenarien)
 - Deployment- oder Security-relevante Änderungen müssen zusätzlich `deployment.md` und `security.md` aktualisieren.
-
-

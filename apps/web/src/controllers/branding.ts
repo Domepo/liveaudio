@@ -24,9 +24,9 @@ function applyLogoUrl(url: string, version: string): void {
 export async function loadBrandingLogo(): Promise<void> {
   try {
     const branding = await fetchJson<BrandingResponse>(`${apiUrl}/api/public/branding`);
-    applyLogoUrl(branding.logoUrl || "/logo.svg", branding.version || "0");
+    applyLogoUrl(branding.logoUrl || "/logo.png", branding.version || "0");
   } catch {
-    app.update((s) => ({ ...s, appLogoUrl: "/logo.svg" }));
+    app.update((s) => ({ ...s, appLogoUrl: "/logo.png" }));
   }
 }
 
@@ -53,7 +53,7 @@ export async function resetAppLogo(): Promise<void> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ logoDataUrl: null })
     });
-    applyLogoUrl(updated.logoUrl || "/logo.svg", updated.version || "default");
+    applyLogoUrl(updated.logoUrl || "/logo.png", updated.version || "default");
     setSettingsStatus(tr("status.logo_reset"));
   } catch (error) {
     setSettingsStatus(tr("status.logo_reset_error", { message: (error as Error).message }));

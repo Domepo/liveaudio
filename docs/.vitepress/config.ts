@@ -6,6 +6,7 @@
   cleanUrls: true,
   lastUpdated: true,
   themeConfig: {
+    logo: "/assets/icon.png",
     search: {
       provider: "local"
     },
