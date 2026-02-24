@@ -1,17 +1,44 @@
-# LiveAudio (MVP)
+﻿# LiveAudio
 
-Audio-only Echtzeit-System mit MediaSoup, Node.js/TypeScript, Prisma und Svelte + Tailwind.
+Produktionsnahes Audio-Streaming-System für Live-Broadcasts mit WebRTC.
 
-## Enthalten
+[Dokumentation](https://domepo.github.io/liveaudio/) • [Repository](https://github.com/Domepo/liveaudio) • [Main Branch](https://github.com/Domepo/liveaudio/tree/main)
 
-- `apps/api`: REST + Socket.IO Signaling + Join/PIN Validierung
-- `apps/media`: MediaSoup Worker/Router/Transport/Producer/Consumer
-- `apps/web`: Broadcaster/Listener Webinterface (Tailwind)
-- `prisma/schema.prisma`: **lokales Dev-Schema (SQLite)**
-- `prisma/schema.postgres.prisma`: **Postgres-Schema fuer Docker/Deployment**
-- `docker-compose.yml`: lokales Container-Setup mit `livevoice-app` + `livevoice-postgres`
+## Warum LiveAudio?
 
-## Schnellstart lokal (ohne Docker)
+- Audio-only Echtzeit-Streaming mit niedriger Latenz
+- Admin- und Listener-UI im Browser
+- Token/PIN-basierter Join-Flow inklusive QR-Link
+- Docker-fähiges Deployment mit Postgres
+- Klare Trennung von API, Media-Pipeline und Web-Frontend
+
+## Stack
+
+- Backend: Node.js, TypeScript, Express, Socket.IO
+- Realtime: mediasoup (WebRTC)
+- Frontend: Svelte
+- Datenbank: Prisma (`SQLite` lokal, `Postgres` für Deployment)
+- Tests: Vitest, Supertest, Playwright
+
+## Projektstruktur
+
+```text
+apps/
+  api/      REST + Auth + Signaling + Business Logic
+  media/    mediasoup Worker/Router/Transports
+  web/      Admin- und Listener-Frontend
+prisma/
+  schema.prisma            SQLite (lokal)
+  schema.postgres.prisma   Postgres (Deployment)
+docs/       VitePress-Dokumentation
+docker/     Docker-Build-Kontext
+```
+
+## Schnellstart lokal
+
+Voraussetzungen:
+- Node.js 20+
+- npm 10+
 
 ```bash
 npm install
@@ -19,76 +46,69 @@ npm run dev
 ```
 
 Startet automatisch:
-
-- Prisma Client Generate + SQLite DB-Init (`prisma/dev.db`)
-- Media: `http://localhost:4000/health`
-- API: `http://localhost:3001/health`
 - Web: `http://localhost:5173`
+- API Health: `http://localhost:3001/health`
+- Media Health: `http://localhost:4000/health`
 
-## Nutzung im lokalen Netzwerk (Handy)
-
-1. Beide Geraete muessen im selben WLAN/LAN sein.
-2. App auf dem Rechner mit `npm run dev` starten.
-3. Rechner-IP ermitteln (z. B. `192.168.x.x`).
-4. Am Handy oeffnen: `http://<RECHNER-IP>:5173`
-5. Join-Link/QR wird jetzt mit derselben Host-IP erzeugt (nicht mehr nur `localhost`).
-
-Hinweis:
-
-- API laeuft auf Port `3001`
-- Media laeuft auf Port `4000` (plus UDP `40000-42000` fuer WebRTC)
-- Firewall muss diese lokalen Verbindungen erlauben.
-
-## Docker-Start (Postgres)
+## Schnellstart Hosting (Docker)
 
 ```bash
-npm run dev:docker
+docker pull ghcr.io/domepo/liveaudio:latest
+docker compose -f docker-compose.hosting.yml up -d
 ```
 
-Docker startet:
+Eine vollständige, kopierbare Hosting-Konfiguration findest du in der Doku:
+- [Getting Started](./docs/getting-started.md)
+- [Deployment](./docs/deployment.md)
 
-- `livevoice-app` (Web + API + Media)
-- `livevoice-postgres`
+## Nutzung im LAN (Handy)
 
-## Testing
+1. Rechner und Handy ins gleiche WLAN/LAN.
+2. App lokal starten: `npm run dev`
+3. Rechner-IP ermitteln (z. B. `192.168.x.x`)
+4. Im Handy-Browser öffnen: `http://<RECHNER-IP>:5173`
 
-Das Projekt hat drei Testebenen:
+Benötigte Ports:
+- `5173/tcp` (Web)
+- `3001/tcp` (API)
+- `4000/tcp` (Media Health/API intern)
+- `40000-42000/udp` (WebRTC Audio)
 
-- API Integration/Unit: `vitest` + `supertest`
-- Web Component Tests: `vitest` + `@testing-library/svelte`
-- E2E Smoke: `playwright`
-
-Schnellbefehle:
+## Tests
 
 ```bash
-# API + Web Tests
+# Unit + Integration (API/Web)
 npm run test:unit
 
-# E2E (baut API+Web vorher automatisch)
+# E2E Smoke
 npm run test:e2e
 
-# Alles
+# Komplett
 npm test
 ```
 
-Hinweise:
+Hinweis für E2E:
+```bash
+npx playwright install chromium
+```
 
-- Vor den Tests sollte die lokale SQLite-DB initialisiert sein:
-  - `npm run db:init`
-- Fuer E2E muss einmalig ein Browser installiert werden:
-  - `npx playwright install chromium`
+## Sicherheitsaspekte
 
-## MVP-Flow
+- Tokens werden gehasht gespeichert (`sha256`)
+- PINs werden gehasht gespeichert (`bcrypt`)
+- Basis-Rate-Limit gegen PIN-Bruteforce ist aktiv
+- Bootstrap-Admin muss Passwortwechsel erzwingen (`mustChangePassword`)
 
-1. Im Bereich **Admin** mit Name + Passwort anmelden (Default lokal: `admin` / `test`, sofern kein Admin-Benutzer angelegt wurde).
-2. Channel erstellen.
-3. Join-Link + PIN erzeugen (inkl. QR-Code).
-4. Broadcast starten (Mic-Freigabe).
-5. Im Tab **Listener** Token + PIN validieren.
-6. Kanal waehlen und Audio starten.
+Details:
+- [Security](./docs/security.md)
+- [Configuration](./docs/configuration.md)
+- [Troubleshooting](./docs/troubleshooting.md)
 
-## Hinweise
+## Nützliche Doku-Links
 
-- Token werden gehasht gespeichert (`sha256`), PIN gehasht (`bcrypt`).
-- Basic Rate-Limit gegen PIN-Bruteforce ist aktiv.
-- UI liest `token` und `pin` aus Query-Params (Join-Link kompatibel).
+- [Dokumentations-Start](./docs/index.md)
+- [Architektur](./docs/architecture.md)
+- [API Übersicht](./docs/api-overview.md)
+- [Operations Runbook](./docs/operations.md)
+- [Testing](./docs/testing.md)
+

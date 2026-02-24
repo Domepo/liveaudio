@@ -31,10 +31,14 @@
     "test:webrtc:smoke": "playwright test -c playwright.webrtc.config.ts",
     "test:perf:smoke": "npm run test:env:reset && npm run test:load:socket:smoke",
     "test:perf:nightly": "npm run test:env:reset && npm run test:load:socket:smoke && npm run test:webrtc:smoke",
-    "test:perf:weekly": "npm run test:perf:nightly"
+    "test:perf:weekly": "npm run test:perf:nightly",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
   },
   "devDependencies": {
     "@playwright/test": "^1.51.1",
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.1",
+    "vitepress": "^1.6.3"
   }
 }

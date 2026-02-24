@@ -15,3 +15,5 @@ apps/api/recordings/*
 logs/
 .skills/
 plan/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
