@@ -1,10 +1,4 @@
-﻿<a id="readme-top"></a>
 
-[![Contributors][contributors-shield]][contributors-url]
-[![Forks][forks-shield]][forks-url]
-[![Stargazers][stars-shield]][stars-url]
-[![Issues][issues-shield]][issues-url]
-<br />
 <div align="center">
   <a href="https://github.com/Domepo/liveaudio">
     <img src="docs/assets/icon.png" alt="LiveAudio Logo" width="96" height="96">
