@@ -1,10 +1,4 @@
-﻿<a id="readme-top"></a>
 
-[![Contributors][contributors-shield]][contributors-url]
-[![Forks][forks-shield]][forks-url]
-[![Stargazers][stars-shield]][stars-url]
-[![Issues][issues-shield]][issues-url]
-<br />
 <div align="center">
   <a href="https://github.com/Domepo/liveaudio">
     <img src="docs/assets/icon.png" alt="LiveAudio Logo" width="96" height="96">
@@ -138,6 +132,7 @@ Benötigte Ports:
 - `3001/tcp` (API)
 - `4000/tcp` (Media intern/health)
 - `40000-42000/udp` (WebRTC)
+- `40000-42000/tcp` (WebRTC, optional)
 
 <p align="right">(<a href="#readme-top">nach oben</a>)</p>
 
