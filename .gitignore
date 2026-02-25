@@ -17,3 +17,4 @@ logs/
 plan/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
+docs/public/icon.png
