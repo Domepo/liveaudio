@@ -343,9 +343,11 @@
               </svg>
             {/if}
           </span>
-          <span class="mt-1 inline-flex h-7 items-center rounded-full border border-slate-300 bg-slate-100 px-2 text-[10px] font-bold uppercase tracking-wide text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-            {$app.sessionStats.listenersConnected} {$t("admin.kpi_listeners")}
-          </span>
+          {#if isMobileOnePager}
+            <span class="mt-1 inline-flex h-7 items-center rounded-full border border-slate-300 bg-slate-100 px-2 text-[10px] font-bold uppercase tracking-wide text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+              {$app.sessionStats.listenersConnected} {$t("admin.kpi_listeners")}
+            </span>
+          {/if}
         </div>
         <button
           class="grid h-8 w-8 place-items-center rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"

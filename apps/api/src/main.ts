@@ -1,5 +1,6 @@
 import "dotenv/config";
 import http from "node:http";
+import { existsSync } from "node:fs";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -64,6 +65,8 @@ const API_HOST = process.env.API_HOST ?? "0.0.0.0";
 const API_JSON_LIMIT = process.env.API_JSON_LIMIT ?? "25mb";
 const IS_TEST_ENV = process.env.NODE_ENV === "test";
 const IS_PROD_ENV = process.env.NODE_ENV === "production";
+const IS_DOCKER_ENV = process.env.RUNNING_IN_DOCKER === "1" || existsSync("/.dockerenv");
+const CAN_ENABLE_DEBUG_MODE = !IS_PROD_ENV && !IS_DOCKER_ENV;
 const JWT_SECRET = process.env.JWT_SECRET ?? (IS_PROD_ENV ? "" : "dev-secret");
 const JWT_ISSUER = process.env.JWT_ISSUER?.trim() || "liveaudio-api";
 const ADMIN_SESSION_COOKIE = "admin_session";
@@ -81,7 +84,7 @@ const MEDIA_INTERNAL_TOKEN = process.env.MEDIA_INTERNAL_TOKEN?.trim() || "";
 const SESSION_STATS_SINCE_PREFIX = "SESSION_STATS_SINCE:";
 const ANALYTICS_RAW_RETENTION_DAYS = Number(process.env.ANALYTICS_RAW_RETENTION_DAYS ?? 400);
 const ANALYTICS_MAX_COMPARE_SESSIONS = 4;
-const DEBUG_MODE_FROM_ENV = process.env.DEBUG_MODE === "1" || process.env.DEBUG_MODE === "true";
+const DEBUG_MODE_FROM_ENV = CAN_ENABLE_DEBUG_MODE && (process.env.DEBUG_MODE === "1" || process.env.DEBUG_MODE === "true");
 const DEBUG_MODE_CONFIG_KEY = "DEBUG_MODE_ENABLED";
 let runtimeDebugMode = DEBUG_MODE_FROM_ENV;
 const API_ORIGIN = process.env.DEBUG_TEST_API_ORIGIN ?? `http://127.0.0.1:${API_PORT}`;
@@ -127,6 +130,11 @@ function assertProductionSecurityConfig(): void {
 }
 
 assertProductionSecurityConfig();
+
+if (IS_DOCKER_ENV && (process.env.DEBUG_MODE === "1" || process.env.DEBUG_MODE === "true")) {
+  // eslint-disable-next-line no-console
+  console.warn("[DEBUG] DEBUG_MODE env is ignored in Docker. Debug mode is only available for local npm run dev.");
+}
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(helmet());
@@ -190,8 +198,12 @@ const runtime = registerRuntime({
   ANALYTICS_RAW_RETENTION_DAYS,
   ANALYTICS_MAX_COMPARE_SESSIONS,
   getDebugMode: () => runtimeDebugMode,
-  canToggleDebugMode: !IS_PROD_ENV,
+  canToggleDebugMode: CAN_ENABLE_DEBUG_MODE,
   setDebugMode: async (enabled: boolean) => {
+    if (!CAN_ENABLE_DEBUG_MODE) {
+      runtimeDebugMode = false;
+      return runtimeDebugMode;
+    }
     runtimeDebugMode = enabled;
     await prisma.appConfig.upsert({
       where: { key: DEBUG_MODE_CONFIG_KEY },
@@ -255,9 +267,13 @@ const runtime = registerRuntime({
 });
 
 async function startServer(): Promise<void> {
-  const debugConfig = await prisma.appConfig.findUnique({ where: { key: DEBUG_MODE_CONFIG_KEY }, select: { value: true } });
-  if (debugConfig?.value === "1" || debugConfig?.value === "true") runtimeDebugMode = true;
-  if (debugConfig?.value === "0" || debugConfig?.value === "false") runtimeDebugMode = false;
+  if (CAN_ENABLE_DEBUG_MODE) {
+    const debugConfig = await prisma.appConfig.findUnique({ where: { key: DEBUG_MODE_CONFIG_KEY }, select: { value: true } });
+    if (debugConfig?.value === "1" || debugConfig?.value === "true") runtimeDebugMode = true;
+    if (debugConfig?.value === "0" || debugConfig?.value === "false") runtimeDebugMode = false;
+  } else {
+    runtimeDebugMode = false;
+  }
   await runtime.bootstrapTimescaleIfAvailable();
   server.listen(API_PORT, API_HOST, () => {
     // eslint-disable-next-line no-console
