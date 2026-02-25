@@ -1,6 +1,6 @@
 const de = {
   "common.app_name": "LiveAudio",
-  "common.dashboard": "Statistiken",
+  "common.dashboard": "Dashboard",
   "common.sessions": "Sessions",
   "common.statistics": "Statistiken",
   "common.users": "Users",

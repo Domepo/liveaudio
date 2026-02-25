@@ -1,0 +1,6 @@
+/* Keep the docs logo small in the top-left navbar title area. */
+.VPNavBarTitle .logo {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+}

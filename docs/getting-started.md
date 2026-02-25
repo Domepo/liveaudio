@@ -23,7 +23,7 @@ Erstelle eine Datei `docker-compose.hosting.yml` mit diesem Inhalt:
 ```yaml
 services:
   postgres:
-    image: timescale/timescaledb:2.17.2-pg16
+    image: ${POSTGRES_IMAGE:-timescale/timescaledb:2.17.2-pg16}
     restart: unless-stopped
     environment:
       POSTGRES_DB: livevoice
@@ -72,6 +72,8 @@ volumes:
 ```bash
 docker compose -f docker-compose.hosting.yml up -d
 ```
+
+Das App-Image wird als Multi-Arch-Image (`linux/amd64` und `linux/arm64`) in GHCR veröffentlicht.
 
 ### 5. Aufruf
 

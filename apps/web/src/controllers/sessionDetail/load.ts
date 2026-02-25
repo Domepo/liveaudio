@@ -43,7 +43,8 @@ export async function loadSelectedSession(): Promise<void> {
     lastSavedSessionMeta: {
       name: data.session.name,
       description: data.session.description ?? "",
-      imageUrl: data.session.imageUrl ?? ""
+      imageUrl: data.session.imageUrl ?? "",
+      broadcastCode: data.session.broadcastCode ?? ""
     },
     channels: data.channels,
     adminLiveChannelIds: data.liveChannelIds ?? [],

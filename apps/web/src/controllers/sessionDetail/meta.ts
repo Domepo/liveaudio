@@ -40,11 +40,18 @@ export async function createAdminSession(): Promise<void> {
 export async function saveSessionMeta(silent = false): Promise<void> {
   const state = get(app);
   if (!state.selectedSessionId) return;
+  const normalizedSessionCode = state.sessionCode.trim();
+  const sessionCodeChanged = normalizedSessionCode !== state.lastSavedSessionMeta.broadcastCode;
   if (
     state.sessionName === state.lastSavedSessionMeta.name &&
     state.sessionDescription === state.lastSavedSessionMeta.description &&
-    state.sessionImageUrl === state.lastSavedSessionMeta.imageUrl
+    state.sessionImageUrl === state.lastSavedSessionMeta.imageUrl &&
+    !sessionCodeChanged
   ) {
+    return;
+  }
+  if (sessionCodeChanged && !/^\d{6}$/.test(normalizedSessionCode)) {
+    if (!silent) setStatus("broadcaster", tr("status.qr_set_token"));
     return;
   }
   try {
@@ -54,12 +61,13 @@ export async function saveSessionMeta(silent = false): Promise<void> {
       body: JSON.stringify({
         name: state.sessionName,
         description: state.sessionDescription,
-        imageUrl: state.sessionImageUrl || null
+        imageUrl: state.sessionImageUrl || undefined,
+        ...(sessionCodeChanged ? { broadcastCode: normalizedSessionCode } : {})
       })
     });
     app.update((s) => ({
       ...s,
-      lastSavedSessionMeta: { name: s.sessionName, description: s.sessionDescription, imageUrl: s.sessionImageUrl }
+      lastSavedSessionMeta: { name: s.sessionName, description: s.sessionDescription, imageUrl: s.sessionImageUrl, broadcastCode: normalizedSessionCode }
     }));
     await loadAdminSessions();
     if (!silent) {

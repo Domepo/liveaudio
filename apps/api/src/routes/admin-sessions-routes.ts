@@ -22,7 +22,7 @@ type AdminSessionsRoutesDeps = {
   requireRoles: (allowed: Role[]) => (req: Request, res: Response, next: (err?: any) => void) => void;
   ensureSessionAccessOr404: (req: Request, res: Response, sessionId: string) => Promise<boolean>;
   createSessionSchema: ZodSchema<{ name: string; description?: string; imageUrl?: string }>;
-  updateSessionSchema: ZodSchema<{ name?: string; description?: string; imageUrl?: string }>;
+  updateSessionSchema: ZodSchema<{ name?: string; description?: string; imageUrl?: string; broadcastCode?: string }>;
   generateUniqueSessionCode: (excludeSessionId?: string) => Promise<string>;
   resolveExistingUserId: (userId?: string) => Promise<string | undefined>;
   fetchSessionStats: (sessionId: string) => Promise<{
@@ -193,8 +193,20 @@ export function registerAdminSessionsRoutes(deps: AdminSessionsRoutesDeps): void
     const parsed = updateSessionSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid payload" });
     try {
-      return res.json(await prisma.session.update({ where: { id: sessionId }, data: { name: parsed.data.name, description: parsed.data.description, imageUrl: parsed.data.imageUrl } }));
-    } catch {
+      return res.json(
+        await prisma.session.update({
+          where: { id: sessionId },
+          data: {
+            name: parsed.data.name,
+            description: parsed.data.description,
+            imageUrl: parsed.data.imageUrl,
+            broadcastCode: parsed.data.broadcastCode,
+            ...(parsed.data.broadcastCode !== undefined ? { broadcastCodeHash: await bcrypt.hash(parsed.data.broadcastCode, 10) } : {})
+          }
+        })
+      );
+    } catch (error) {
+      if ((error as { code?: string })?.code === "P2002") return res.status(409).json({ error: "Broadcast code already exists" });
       return res.status(404).json({ error: "Session not found" });
     }
   });

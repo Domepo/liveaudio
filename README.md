@@ -1,17 +1,16 @@
-﻿<a id="readme-top"></a>
+﻿<!-- <a id="readme-top"></a>
 
 [![Contributors][contributors-shield]][contributors-url]
 [![Forks][forks-shield]][forks-url]
 [![Stargazers][stars-shield]][stars-url]
-[![Issues][issues-shield]][issues-url]
-
+[![Issues][issues-shield]][issues-url] -->
 <br />
 <div align="center">
   <a href="https://github.com/Domepo/liveaudio">
     <img src="docs/assets/icon.png" alt="LiveAudio Logo" width="96" height="96">
   </a>
 
-  <h3 align="center">LiveAudio</h3>
+  <h3 align="center">LiveAudio – Open-Source Alternative zu LiveVoice</h3>
 
   <p align="center">
     Produktionsnahes Audio-Streaming-System fuer Live-Broadcasts mit WebRTC.
@@ -52,7 +51,7 @@
 
 ## About The Project
 
-[![LiveAudio Dashboard][product-screenshot]](docs/assets/dashboard.png)
+[![LiveAudio Demo][product-screenshot]](docs/assets/readme_gif.gif)
 
 LiveAudio ist ein Audio-only Realtime-System fuer Live-Uebertragungen mit klarer Trennung zwischen Admin-Steuerung, Media-Pipeline und Listener-Client.
 
@@ -104,6 +103,8 @@ Startet:
 docker pull ghcr.io/domepo/liveaudio:latest
 docker compose -f docker-compose.hosting.yml up -d
 ```
+
+Die App-Container bauen nativ fuer die jeweilige Architektur (`amd64`/`arm64`).
 
 Vollstaendige Hosting-Anleitung:
 - [Getting Started](./docs/getting-started.md)
@@ -216,4 +217,5 @@ Dokumentation:
 [stars-url]: https://github.com/Domepo/liveaudio/stargazers
 [issues-shield]: https://img.shields.io/github/issues/Domepo/liveaudio.svg?style=for-the-badge
 [issues-url]: https://github.com/Domepo/liveaudio/issues
-[product-screenshot]: docs/assets/dashboard.png
+[product-screenshot]: docs/assets/readme_gif.gif
+[docs-url]: https://domepo.github.io/liveaudio/

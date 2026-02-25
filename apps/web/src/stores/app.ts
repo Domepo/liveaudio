@@ -116,7 +116,7 @@ export type AppState = {
   settingsConfirmDestructiveActions: boolean;
   settingsDefaultJoinBaseUrl: string;
 
-  lastSavedSessionMeta: { name: string; description: string; imageUrl: string };
+  lastSavedSessionMeta: { name: string; description: string; imageUrl: string; broadcastCode: string };
   isHydratingSessionMeta: boolean;
   listenerLiveStateBackoffUntilMs: number;
   listenerWantsListen: boolean;
@@ -231,7 +231,7 @@ const defaultState: AppState = {
   settingsConfirmDestructiveActions: true,
   settingsDefaultJoinBaseUrl: "",
 
-  lastSavedSessionMeta: { name: "", description: "", imageUrl: "" },
+  lastSavedSessionMeta: { name: "", description: "", imageUrl: "", broadcastCode: "" },
   isHydratingSessionMeta: false,
   listenerLiveStateBackoffUntilMs: 0,
   listenerWantsListen: false,

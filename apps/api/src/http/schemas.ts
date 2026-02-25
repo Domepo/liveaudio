@@ -70,7 +70,8 @@ export const validateCodeSchema = z.object({ code: z.string().regex(/^\d{6}$/) }
 export const updateSessionSchema = z.object({
   name: z.string().min(2).max(100).optional(),
   description: z.string().max(2000).optional(),
-  imageUrl: z.string().max(2000).optional()
+  imageUrl: z.string().max(2000).optional(),
+  broadcastCode: z.string().regex(/^\d{6}$/).optional()
 });
 
 export const updateSessionUserAccessSchema = z.object({

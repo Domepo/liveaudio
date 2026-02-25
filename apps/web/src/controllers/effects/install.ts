@@ -14,7 +14,7 @@ export function installEffects(): () => void {
   const unsubscribe = app.subscribe((s) => {
     // Auto-save session meta (matches original `$:` block).
     if (s.isAdminRoute && s.adminAuthenticated && canAccessTab("sessions") && s.adminView === "detail" && s.selectedSessionId && !s.isHydratingSessionMeta) {
-      const key = `${s.selectedSessionId}|${s.sessionName}|${s.sessionDescription}|${s.sessionImageUrl}`;
+      const key = `${s.selectedSessionId}|${s.sessionName}|${s.sessionDescription}|${s.sessionImageUrl}|${s.sessionCode}`;
       if (key !== prevAutoSaveKey) {
         prevAutoSaveKey = key;
         scheduleAutoSaveSessionMeta();

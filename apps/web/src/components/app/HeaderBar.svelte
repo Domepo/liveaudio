@@ -37,8 +37,8 @@
           <p class="text-sm font-black text-slate-900 dark:text-slate-100">{adminContextLabel()}</p>
         </div>
 
-        <button class="ml-4 hidden text-sm font-semibold text-slate-600 hover:text-orange-600 sm:inline-flex dark:text-slate-300 dark:hover:text-orange-400" onclick={goToDashboard}>{$t("common.dashboard")}</button>
         {#if $app.isAdminRoute}
+          <button class="ml-4 hidden text-sm font-semibold text-slate-600 hover:text-orange-600 sm:inline-flex dark:text-slate-300 dark:hover:text-orange-400" onclick={goToDashboard}>{$t("common.dashboard")}</button>
           {#if canAccessTab("sessions") && ($app.adminView !== "dashboard" || $app.dashboardTab === "sessions")}
             <div class="text-slate-400">></div>
             <button class="text-sm font-semibold text-slate-600 hover:text-orange-600 dark:text-slate-300 dark:hover:text-orange-400" onclick={goToAdminList}>{$t("common.my_sessions")}</button>

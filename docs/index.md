@@ -1,7 +1,5 @@
 # LiveAudio Dokumentation
 
-![LiveAudio Logo](/assets/icon.png)
-
 Diese VitePress-Dokumentation beschreibt den gesamten technischen Rahmen von LiveAudio:
 
 - lokale Entwicklung
@@ -10,24 +8,9 @@ Diese VitePress-Dokumentation beschreibt den gesamten technischen Rahmen von Liv
 - Deployment und Betrieb
 - Teststrategie und Fehlersuche
 
-## Screenshots
+## Demo
 
-### Dashboard
-
-![Dashboard](/assets/dashboard.png)
-
-### Statistik
-
-![Statistik](/assets/statistics.png)
-
-### Live Speak Ansicht
-
-![Speak Live Dashboard](/assets/speak_live_dashboard.png)
-
-### Listener
-
-![Client Join](/assets/client_view_join.png)
-![Client View](/assets/client_view.png)
+![LiveAudio Demo](/assets/readme_gif.gif)
 
 ## Zielgruppe
 

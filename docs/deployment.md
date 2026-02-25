@@ -56,6 +56,11 @@ Trigger:
 - Tag `v*.*.*`
 - manueller Trigger
 
+Build-Strategie:
+
+- Docker Buildx mit QEMU
+- Multi-Arch Push fuer `linux/amd64` und `linux/arm64`
+
 Image:
 
 - `ghcr.io/domepo/liveaudio:latest`
