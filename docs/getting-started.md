@@ -23,7 +23,7 @@ Erstelle eine Datei `docker-compose.hosting.yml` mit diesem Inhalt:
 ```yaml
 services:
   postgres:
-    image: ${POSTGRES_IMAGE:-timescale/timescaledb:2.17.2-pg16}
+    image: timescale/timescaledb:latest-pg16
     restart: unless-stopped
     environment:
       POSTGRES_DB: livevoice
@@ -44,7 +44,7 @@ services:
       POSTGRES_DB: livevoice
       POSTGRES_PASSWORD: change-me-postgres
       DATABASE_URL: postgresql://postgres:change-me-postgres@postgres:5432/livevoice?schema=public
-      API_PORT: 3001
+      API_PORT: 3000
       API_HOST: 0.0.0.0
       MEDIA_PORT: 4000
       MEDIA_LISTEN_IP: 0.0.0.0
@@ -60,7 +60,7 @@ services:
       ADMIN_PASSWORD_HASH: <BCRYPT_HASH>
     ports:
       - "5173:5173"
-      - "3001:3001"
+      - "3000:3000"
       - "40000-42000:40000-42000/udp"
 
 volumes:
