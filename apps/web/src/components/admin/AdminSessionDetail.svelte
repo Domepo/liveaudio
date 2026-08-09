@@ -8,16 +8,13 @@
   import { deleteSession } from "../../controllers/admin/sessions";
   import { setSessionUserAssignment } from "../../controllers/admin/users";
   import { refreshAudioInputs } from "../../controllers/broadcaster/audioInputs";
-  import { refreshPreShowAutoSwitchSchedule, startBroadcast, startPreShowMusic, startTestToneBroadcast } from "../../controllers/broadcaster/broadcast";
+  import { startBroadcast, stopBroadcast } from "../../controllers/broadcaster/broadcast";
   import { createChannel, deleteChannel, rotateSessionCode } from "../../controllers/sessionDetail/channels";
   import { downloadQr, printQrCard } from "../../controllers/sessionDetail";
   import { handleEditImageUpload } from "../../controllers/images";
   import { copy } from "../../controllers/clipboard";
   import { deleteRecording, startRecording, stopRecording } from "../../controllers/recording";
   import { refreshSessionStats } from "../../controllers/sessionDetail/stats";
-  import { deletePreShowTrack, uploadPreShowTrack } from "../../controllers/sessionDetail/preshow";
-  import { savePreShowAutoSwitchSettings } from "../../controllers/sessionDetail/autoSwitch";
-  import { setStatus } from "../../controllers/logging";
   import DropdownSelect from "../ui/DropdownSelect.svelte";
 
   type SpeakPanel = "live" | "recordings" | "edit";
@@ -26,24 +23,11 @@
   let isMobileOnePager = false;
   let mobileMediaQuery: MediaQueryList | null = null;
   let mobileMediaQueryListener: ((event: MediaQueryListEvent) => void) | null = null;
-  const MAX_PRESHOW_TRACKS = 10;
   $: isLiveOnAir = $app.isBroadcasting || $app.isPreshowMusicActive || $app.isTestToneActive;
   let isSwitchingLive = false;
-  let preShowSongFileInput: HTMLInputElement | null = null;
-  let liveModeSource: "song" | "mic" = "song";
 
   $: broadcastOccupiedByOther = $app.broadcastOccupiedByOther && !$app.isBroadcasting;
   $: ownerStartedAtLabel = $app.broadcastOwnerStartedAt ? new Date($app.broadcastOwnerStartedAt).toLocaleString() : "-";
-  $: selectedPreShowTrack = $app.preShowTracks.find((track) => track.id === $app.selectedPreShowTrackId) ?? null;
-  function shortenSongLabel(value: string, maxLength = 22): string {
-    if (!value) return "";
-    return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
-  }
-  $: preShowTrackOptions = $app.preShowTracks.map((track) => ({ value: track.id, label: shortenSongLabel(track.name) }));
-  $: preShowSwitchHour = ($app.preShowAutoSwitchTime?.split(":")[0] || "08").padStart(2, "0");
-  $: preShowSwitchMinute = ($app.preShowAutoSwitchTime?.split(":")[1] || "00").padStart(2, "0");
-  $: timeHourOptions = Array.from({ length: 24 }, (_, i) => ({ value: String(i).padStart(2, "0"), label: String(i).padStart(2, "0") }));
-  $: timeMinuteOptions = Array.from({ length: 60 }, (_, i) => ({ value: String(i).padStart(2, "0"), label: String(i).padStart(2, "0") }));
 
   let micPreviewDb = -60;
   let micPreviewPercent = 0;
@@ -59,10 +43,10 @@
   $: micPreviewPercent = Math.max(0, Math.min(100, channelDbToPercent(micPreviewDb)));
   $: previewDeviceId = $app.channels[0]?.id ? ($app.channelInputAssignments[$app.channels[0].id] || "") : "";
   $: {
-    const nextKey = `${speakPanel}|${liveModeSource}|${$app.isBroadcasting}|${$app.isPreshowMusicActive}|${$app.isTestToneActive}|${previewDeviceId}|${$app.selectedSessionId}`;
+    const nextKey = `${speakPanel}|${$app.isBroadcasting}|${$app.isPreshowMusicActive}|${$app.isTestToneActive}|${previewDeviceId}|${$app.selectedSessionId}`;
     if (nextKey !== micPreviewKey) {
       micPreviewKey = nextKey;
-      if (speakPanel === "live" && liveModeSource === "mic" && !$app.isBroadcasting && !$app.isPreshowMusicActive && !$app.isTestToneActive) {
+      if (speakPanel === "live" && !isLiveOnAir) {
         void startMicPreview(previewDeviceId);
       } else {
         stopMicPreview();
@@ -147,122 +131,19 @@
     }
   }
 
-  async function handleStartMicLive(): Promise<void> {
-    if (isSwitchingLive) return;
-    isSwitchingLive = true;
-    stopMicPreview();
-    try {
-      await startBroadcast();
-    } finally {
-      isSwitchingLive = false;
-    }
-  }
-
-  async function handleStartSongLive(): Promise<void> {
-    if (isSwitchingLive) return;
-    isSwitchingLive = true;
-    stopMicPreview();
-    try {
-      await startPreShowMusic();
-    } finally {
-      isSwitchingLive = false;
-    }
-  }
-
-  async function handleStartTestToneLive(): Promise<void> {
-    if (isSwitchingLive) return;
-    isSwitchingLive = true;
-    stopMicPreview();
-    try {
-      await startTestToneBroadcast();
-    } finally {
-      isSwitchingLive = false;
-    }
-  }
-
-  async function removeSelectedPreShowTrack(): Promise<void> {
-    if (!selectedPreShowTrack) return;
-    try {
-      await deletePreShowTrack(selectedPreShowTrack.id);
-    } catch (error) {
-      setStatus("broadcaster", `Song konnte nicht entfernt werden: ${(error as Error).message}`);
-    }
-  }
-
-  async function handlePreShowSongUpload(event: Event): Promise<void> {
-    const input = event.target as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-    if ($app.preShowTracks.length >= MAX_PRESHOW_TRACKS) {
-      setStatus("broadcaster", `Maximal ${MAX_PRESHOW_TRACKS} Songs erlaubt. Bitte erst einen Song entfernen.`);
-      input.value = "";
-      return;
-    }
-    try {
-      await uploadPreShowTrack(file);
-    } catch (error) {
-      setStatus("broadcaster", `Song konnte nicht hochgeladen werden: ${(error as Error).message}`);
-    } finally {
-      input.value = "";
-    }
-  }
-
-  async function toggleLiveModeSource(): Promise<void> {
-    if (isSwitchingLive) return;
-    const previous = liveModeSource;
-    const next = previous === "song" ? "mic" : "song";
-    liveModeSource = next;
-
-    if (!isLiveOnAir) return;
-
-    if (next === "song" && !selectedPreShowTrack) {
-      liveModeSource = previous;
-      setStatus("broadcaster", "Bitte zuerst ein Lied auswaehlen.");
-      return;
-    }
-
-    if (next === "song") {
-      await handleStartSongLive();
-      return;
-    }
-    await handleStartMicLive();
-  }
-
   async function handlePrimaryLiveToggle(): Promise<void> {
     if (isSwitchingLive) return;
-    if (liveModeSource === "song") {
-      await handleStartSongLive();
-      return;
-    }
-    await handleStartMicLive();
-  }
-
-  async function persistAutoSwitchSettings(): Promise<void> {
+    isSwitchingLive = true;
+    stopMicPreview();
     try {
-      await savePreShowAutoSwitchSettings();
-    } catch (error) {
-      setStatus("broadcaster", `Auto-Switch konnte nicht gespeichert werden: ${(error as Error).message}`);
+      if (isLiveOnAir) {
+        await stopBroadcast();
+      } else {
+        await startBroadcast();
+      }
+    } finally {
+      isSwitchingLive = false;
     }
-  }
-
-  function setAutoSwitchEnabled(enabled: boolean): void {
-    app.update((s) => ({ ...s, preShowAutoSwitchEnabled: enabled }));
-    refreshPreShowAutoSwitchSchedule();
-    void persistAutoSwitchSettings();
-  }
-
-  function setAutoSwitchTime(value: string): void {
-    app.update((s) => ({ ...s, preShowAutoSwitchTime: value }));
-    refreshPreShowAutoSwitchSchedule();
-    void persistAutoSwitchSettings();
-  }
-
-  function setAutoSwitchHour(value: string): void {
-    setAutoSwitchTime(`${value}:${preShowSwitchMinute}`);
-  }
-
-  function setAutoSwitchMinute(value: string): void {
-    setAutoSwitchTime(`${preShowSwitchHour}:${value}`);
   }
 
   onMount(() => {
@@ -329,19 +210,11 @@
             aria-live="polite"
           >
             <span class={`h-2 w-2 rounded-full ${isLiveOnAir ? "bg-red-500" : "bg-slate-400 dark:bg-slate-500"}`}></span>
-            LIVE
-            {#if liveModeSource === "song"}
-              <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" aria-hidden="true">
-                <path d="M9 18V5l10-2v13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                <circle cx="6" cy="18" r="3" fill="none" stroke="currentColor" stroke-width="2"></circle>
-                <circle cx="16" cy="16" r="3" fill="none" stroke="currentColor" stroke-width="2"></circle>
-              </svg>
-            {:else}
-              <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" aria-hidden="true">
-                <path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 1 0-8 0v4a4 4 0 0 0 4 4z" fill="none" stroke="currentColor" stroke-width="2"></path>
-                <path d="M19 11a7 7 0 1 1-14 0M12 18v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
-              </svg>
-            {/if}
+            {isLiveOnAir ? "ON AIR" : "BEREIT"}
+            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" aria-hidden="true">
+              <path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 1 0-8 0v4a4 4 0 0 0 4 4z" fill="none" stroke="currentColor" stroke-width="2"></path>
+              <path d="M19 11a7 7 0 1 1-14 0M12 18v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+            </svg>
           </span>
           {#if isMobileOnePager}
             <span class="mt-1 inline-flex h-7 items-center rounded-full border border-slate-300 bg-slate-100 px-2 text-[10px] font-bold uppercase tracking-wide text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
@@ -365,74 +238,68 @@
         </button>
       </div>
 
-      <div class="mt-4 hidden grid-cols-3 gap-2 md:grid">
+      <div class="mt-4 hidden rounded-2xl border border-slate-200 bg-slate-50 p-1 md:grid md:grid-cols-3 dark:border-slate-700 dark:bg-slate-950/60" role="tablist" aria-label="Ansicht auswählen">
         <button
-          class={`truncate rounded-xl px-2 py-2 text-[11px] font-semibold sm:px-3 sm:text-xs ${speakPanel === "live" ? "bg-orange-500 text-white" : "border border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"}`}
+          class={`truncate rounded-xl px-2 py-2 text-[11px] font-semibold transition sm:px-3 sm:text-xs ${speakPanel === "live" ? "bg-white text-slate-950 shadow-sm ring-1 ring-slate-200 dark:bg-slate-800 dark:text-white dark:ring-slate-700" : "text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"}`}
           onclick={() => (speakPanel = "live")}
+          role="tab"
+          aria-selected={speakPanel === "live"}
           type="button"
         >
           {$t("detail.live")}
         </button>
         <button
-          class={`truncate rounded-xl px-2 py-2 text-[11px] font-semibold sm:px-3 sm:text-xs ${speakPanel === "edit" ? "bg-orange-500 text-white" : "border border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"}`}
+          class={`truncate rounded-xl px-2 py-2 text-[11px] font-semibold transition sm:px-3 sm:text-xs ${speakPanel === "edit" ? "bg-white text-slate-950 shadow-sm ring-1 ring-slate-200 dark:bg-slate-800 dark:text-white dark:ring-slate-700" : "text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"}`}
           onclick={() => (speakPanel = "edit")}
+          role="tab"
+          aria-selected={speakPanel === "edit"}
           type="button"
         >
           {$t("detail.edit")}
         </button>
         <button
-          class={`truncate rounded-xl px-2 py-2 text-[11px] font-semibold sm:px-3 sm:text-xs ${speakPanel === "recordings" ? "bg-orange-500 text-white" : "border border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"}`}
+          class={`truncate rounded-xl px-2 py-2 text-[11px] font-semibold transition sm:px-3 sm:text-xs ${speakPanel === "recordings" ? "bg-white text-slate-950 shadow-sm ring-1 ring-slate-200 dark:bg-slate-800 dark:text-white dark:ring-slate-700" : "text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"}`}
           onclick={() => (speakPanel = "recordings")}
+          role="tab"
+          aria-selected={speakPanel === "recordings"}
           type="button"
         >
           {$t("detail.recordings")}
         </button>
       </div>
 
-      <div class="mt-3 grid grid-cols-[1fr_auto] gap-2">
+      <div class={`mt-4 rounded-2xl border p-3 ${isLiveOnAir ? "border-red-200 bg-red-50/70 dark:border-red-900 dark:bg-red-950/20" : "border-emerald-200 bg-emerald-50/70 dark:border-emerald-900 dark:bg-emerald-950/20"}`}>
+        <div class="mb-3 flex items-center gap-2">
+          <span class={`grid h-8 w-8 place-items-center rounded-full ${isLiveOnAir ? "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300" : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300"}`}>
+            <svg viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">
+              <path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 1 0-8 0v4a4 4 0 0 0 4 4z" fill="none" stroke="currentColor" stroke-width="2"></path>
+              <path d="M19 11a7 7 0 1 1-14 0M12 18v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+            </svg>
+          </span>
+          <div>
+            <p class="text-sm font-bold">Mikrofon-Übertragung</p>
+            <p class="text-[11px] text-slate-500 dark:text-slate-400">{isLiveOnAir ? "Die Übertragung läuft." : "Bereit zum Senden."}</p>
+          </div>
+        </div>
         <button
-          class={`w-full rounded-xl px-3 py-2 text-xs font-semibold disabled:opacity-50 ${
-            isLiveOnAir ? "border border-red-300 text-red-700 hover:bg-red-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/20" : "bg-black text-white hover:bg-slate-800 dark:bg-white dark:text-black dark:hover:bg-slate-200"
+          class={`w-full rounded-xl px-4 py-3 text-sm font-bold shadow-sm transition disabled:cursor-wait disabled:opacity-60 ${
+            isLiveOnAir ? "bg-red-600 text-white hover:bg-red-700" : "bg-emerald-600 text-white hover:bg-emerald-700"
           }`}
           onclick={handlePrimaryLiveToggle}
           disabled={
             !$app.selectedSessionId ||
             !$app.sessionCode ||
             $app.channels.length === 0 ||
-            isSwitchingLive ||
-            (liveModeSource === "song" && !selectedPreShowTrack && !$app.isPreshowMusicActive)
+            isSwitchingLive
           }
           type="button"
         >
           {#if isSwitchingLive}
-            Wechsel...
+            {isLiveOnAir ? "Übertragung wird gestoppt..." : "Übertragung wird gestartet..."}
           {:else if isLiveOnAir}
-            Live stoppen
-          {:else if liveModeSource === "song"}
-            Mit Lied live gehen
+            Live-Übertragung stoppen
           {:else}
-            Mit Mic live gehen
-          {/if}
-        </button>
-        <button
-          class="grid h-9 w-9 place-items-center rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-          onclick={toggleLiveModeSource}
-          disabled={isSwitchingLive}
-          type="button"
-          title={liveModeSource === "song" ? "Quelle: Lied" : "Quelle: Mic"}
-          aria-label={liveModeSource === "song" ? "Quelle: Lied" : "Quelle: Mic"}
-        >
-          {#if liveModeSource === "song"}
-            <svg viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">
-              <path d="M9 18V5l10-2v13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-              <circle cx="6" cy="18" r="3" fill="none" stroke="currentColor" stroke-width="2"></circle>
-              <circle cx="16" cy="16" r="3" fill="none" stroke="currentColor" stroke-width="2"></circle>
-            </svg>
-          {:else}
-            <svg viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">
-              <path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 1 0-8 0v4a4 4 0 0 0 4 4z" fill="none" stroke="currentColor" stroke-width="2"></path>
-              <path d="M19 11a7 7 0 1 1-14 0M12 18v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
-            </svg>
+            Jetzt live gehen
           {/if}
         </button>
       </div>
@@ -513,137 +380,7 @@
           </div>
         </div>
 
-        <div class="mt-5 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
-          <p class="text-sm font-semibold">{$t("detail.preshow_music")}</p>
-          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{$t("detail.preshow_hint")}</p>
-
-          <input bind:this={preShowSongFileInput} id="preshow-song-file" class="hidden" type="file" accept="audio/*" onchange={handlePreShowSongUpload} />
-          <div class="mt-2 flex min-w-0 items-center gap-2">
-            <button
-              class="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-              onclick={() => preShowSongFileInput?.click()}
-              disabled={$app.isPreshowMusicActive || $app.preShowTracks.length >= MAX_PRESHOW_TRACKS}
-              type="button"
-              title={$t("detail.upload_song")}
-              aria-label={$t("detail.upload_song")}
-            >
-              <svg viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">
-                <path d="M12 15V5m0 0-3 3m3-3 3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                <path d="M20 15v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
-              </svg>
-            </button>
-            <div class="min-w-0 flex-1">
-              <DropdownSelect
-                options={preShowTrackOptions}
-                value={$app.selectedPreShowTrackId}
-                placeholder={$app.preShowTracks.length === 0 ? "Keine Songs hochgeladen" : "Lieder auswaehlen"}
-                disabled={$app.preShowTracks.length === 0}
-                triggerClass="h-8 px-2.5 py-1.5 text-sm"
-                menuClass="max-h-52"
-                on:change={(event) => app.update((s) => ({ ...s, selectedPreShowTrackId: event.detail.value }))}
-              />
-            </div>
-            <button
-              class="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-red-400 bg-white text-red-600 hover:bg-red-50 disabled:border-slate-300 disabled:bg-white disabled:text-slate-400 disabled:opacity-100 dark:border-red-700 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-900/20 dark:disabled:border-slate-700 dark:disabled:bg-slate-900 dark:disabled:text-slate-600"
-              onclick={removeSelectedPreShowTrack}
-              disabled={!selectedPreShowTrack || $app.isPreshowMusicActive}
-              type="button"
-              title={$t("detail.remove_song")}
-              aria-label={$t("detail.remove_song")}
-            >
-              <svg viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">
-                <path d="M3 6h18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                <path d="M10 11v6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                <path d="M14 11v6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-              </svg>
-            </button>
-          </div>
-
-          <div class="mt-2 grid gap-2">
-            {#if $app.debugMode}
-              <button
-                class={`rounded-xl px-3 py-2 text-xs font-semibold disabled:opacity-50 ${
-                  $app.isTestToneActive ? "border border-red-300 text-red-700 hover:bg-red-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/20" : "border border-orange-300 text-orange-700 hover:bg-orange-50 dark:border-orange-700 dark:text-orange-300 dark:hover:bg-orange-900/20"
-                }`}
-                onclick={handleStartTestToneLive}
-                disabled={!$app.selectedSessionId || !$app.sessionCode || $app.channels.length === 0 || isSwitchingLive}
-                type="button"
-              >
-                {#if isSwitchingLive}
-                  Wechsel...
-                {:else}
-                  {$app.isTestToneActive ? "400Hz stoppen" : "400Hz Testton Live"}
-                {/if}
-              </button>
-            {/if}
-          </div>
-
-          {#if isSwitchingLive}
-            <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">Signal wird umgeschaltet...</p>
-          {/if}
-
-          {#if $app.isPreshowMusicActive}
-            <p class="mt-2 rounded-lg border border-emerald-300 bg-emerald-50 px-2 py-1 text-xs text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300">
-              {$t("detail.preshow_active")}
-            </p>
-          {/if}
-        </div>
-
-        <div
-          class={`${$app.preShowAutoSwitchEnabled ? "mt-4" : "mt-2"} rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900 ${
-            $app.preShowAutoSwitchEnabled ? "p-3" : "px-3 py-2"
-          }`}
-        >
-          <div class="flex items-center justify-between gap-3">
-            <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">Auto-Switch</p>
-            <label class="relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center">
-              <input
-                type="checkbox"
-                class="peer sr-only"
-                checked={$app.preShowAutoSwitchEnabled}
-                onchange={(event) => setAutoSwitchEnabled((event.target as HTMLInputElement).checked)}
-              />
-              <span class="absolute inset-0 rounded-full bg-slate-300 transition peer-checked:bg-orange-500 dark:bg-slate-600"></span>
-              <span class="absolute left-0.5 h-6 w-6 rounded-full bg-white shadow transition peer-checked:translate-x-5"></span>
-            </label>
-          </div>
-
-          {#if $app.preShowAutoSwitchEnabled}
-            <p class="mt-3 text-[11px] text-slate-600 dark:text-slate-300">Automatisch vom Lied auf Mic zur gesetzten Uhrzeit.</p>
-            <div class="mt-3 rounded-xl border border-slate-300 bg-white/80 px-2.5 py-2 dark:border-slate-700 dark:bg-slate-900/70">
-              <label class="block text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Switch-Zeit</label>
-              <div class="mt-1 flex items-center gap-2">
-                <svg viewBox="0 0 24 24" class="h-4 w-4 text-slate-500 dark:text-slate-400" aria-hidden="true">
-                  <path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                  <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"></circle>
-                </svg>
-                <div class="min-w-0 flex-1">
-                  <DropdownSelect
-                    options={timeHourOptions}
-                    value={preShowSwitchHour}
-                    triggerClass="h-8 bg-white/70 px-2 text-sm dark:bg-slate-900/60"
-                    menuClass="max-h-48"
-                    on:change={(event) => setAutoSwitchHour(event.detail.value)}
-                  />
-                </div>
-                <span class="text-center text-sm font-bold text-slate-500 dark:text-slate-400">:</span>
-                <div class="min-w-0 flex-1">
-                  <DropdownSelect
-                    options={timeMinuteOptions}
-                    value={preShowSwitchMinute}
-                    triggerClass="h-8 bg-white/70 px-2 text-sm dark:bg-slate-900/60"
-                    menuClass="max-h-48"
-                    on:change={(event) => setAutoSwitchMinute(event.detail.value)}
-                  />
-                </div>
-              </div>
-            </div>
-          {/if}
-        </div>
-
-        <div class={`lv-admin-device-grid grid grid-cols-2 gap-2 ${$app.preShowAutoSwitchEnabled ? "mt-4" : "mt-2"}`}>
+        <div class="lv-admin-device-grid mt-4 grid grid-cols-2 gap-2">
           <button
             class="rounded-xl border border-slate-300 px-3 py-2 text-xs hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
             onclick={() => refreshAudioInputs(false)}

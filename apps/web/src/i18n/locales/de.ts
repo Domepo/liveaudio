@@ -89,7 +89,7 @@ const de = {
   "detail.refresh_stats": "Stats aktualisieren",
   "detail.edit": "Bearbeiten",
   "detail.recordings": "Aufnahmen",
-  "detail.live": "Live",
+  "detail.live": "Steuerung",
   "detail.preshow_music": "Musik",
   "detail.preshow_hint": "Du kannst bis zu 10 Lieder hochladen. Es kann immer nur ein Lied aktiv sein.",
   "detail.upload_song": "Lied hochladen",

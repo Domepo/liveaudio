@@ -89,7 +89,7 @@ const uk = {
   "detail.refresh_stats": "Onovyty stats",
   "detail.edit": "Redahuvaty",
   "detail.recordings": "Zapysy",
-  "detail.live": "Live",
+  "detail.live": "Keruvannia",
   "detail.preshow_music": "Pre-show muzyka",
   "detail.preshow_hint": "Mozhna zavantazhyty do 10 pisen. Aktyvnoiu mozhe buty lyshe odna.",
   "detail.upload_song": "Zavantazhyty pisniu",

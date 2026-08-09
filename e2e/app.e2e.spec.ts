@@ -155,7 +155,13 @@ test("admin session and channel flow with token rotation", async ({ page }) => {
   await page.getByRole("button", { name: "Channel hinzufuegen" }).click();
   await expect(page.locator(`p:visible:has-text("${createdChannelName}")`).first()).toBeVisible();
 
-  await page.getByRole("button", { name: "Bearbeiten" }).click();
+  const controlTab = page.getByRole("tab", { name: "Steuerung" });
+  await expect(controlTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("button", { name: "Jetzt live gehen" })).toBeEnabled();
+  await expect(page.getByText("Auto-Switch", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Musik", { exact: true })).toHaveCount(0);
+
+  await page.getByRole("tab", { name: "Bearbeiten" }).click();
   const sessionToken = page.locator("#session-token:visible").first();
   await expect(sessionToken).toHaveValue(/^\d{6}$/);
   await page.getByRole("button", { name: "Neu" }).click();
@@ -198,6 +204,20 @@ test("viewer role visibility remains restricted", async ({ page }) => {
   await expect(page.getByText("Statistik").first()).toBeVisible();
 });
 
+test("admin starts and stops the real microphone broadcast with one click", async ({ page, context }) => {
+  await context.grantPermissions(["microphone"], { origin: "http://127.0.0.1:4173" });
+  await loginAs(page, CREDENTIALS.admin.name, CREDENTIALS.admin.password);
+
+  await page.getByRole("button", { name: "Sonntag 09:30", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Sonntag 09:30" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Jetzt live gehen" }).click();
+  await expect(page.getByRole("button", { name: "Live-Übertragung stoppen" })).toBeVisible({ timeout: 30_000 });
+
+  await page.getByRole("button", { name: "Live-Übertragung stoppen" }).click();
+  await expect(page.getByRole("button", { name: "Jetzt live gehen" })).toBeVisible({ timeout: 30_000 });
+});
+
 test("listener token flow covers invalid and valid join", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator("#listener-token")).toBeVisible();
@@ -206,7 +226,7 @@ test("listener token flow covers invalid and valid join", async ({ page }) => {
   await page.getByRole("button", { name: "Weiter" }).click();
   await expect(page.getByText(/Fehler:/)).toBeVisible();
 
-  const validSeedToken = "100001";
+  const validSeedToken = loadSessionCode("dev-session-01", "100001");
   await page.locator("#listener-token").fill(validSeedToken);
   await page.getByRole("button", { name: "Weiter" }).click();
 

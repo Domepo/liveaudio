@@ -89,7 +89,7 @@ const en = {
   "detail.refresh_stats": "Refresh stats",
   "detail.edit": "Edit",
   "detail.recordings": "Recordings",
-  "detail.live": "Live",
+  "detail.live": "Control",
   "detail.preshow_music": "Pre-show music",
   "detail.preshow_hint": "You can upload up to 10 songs. Only one can be active at a time.",
   "detail.upload_song": "Upload song",

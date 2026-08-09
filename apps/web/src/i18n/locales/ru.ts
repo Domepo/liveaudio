@@ -89,7 +89,7 @@ const ru = {
   "detail.refresh_stats": "Obnovit stats",
   "detail.edit": "Redaktirovat",
   "detail.recordings": "Zapisi",
-  "detail.live": "Live",
+  "detail.live": "Upravlenie",
   "detail.preshow_music": "Pre-show muzyka",
   "detail.preshow_hint": "Mozhno zagruzit do 10 pesen. Aktivnoy mozhet byt tolko odna.",
   "detail.upload_song": "Zagruzit pesnyu",
