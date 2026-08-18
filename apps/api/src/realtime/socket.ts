@@ -128,9 +128,10 @@ export function registerSocketRealtime(deps: SocketDeps): void {
     }
 
     socket.on("disconnect", () => {
-      if (auth.role === "LISTENER") {
-        void mediaPost("/clients/disconnect", { clientId: socket.id }).catch(() => undefined);
-      }
+      // Always close the media transports owned by this socket. Broadcaster
+      // transports contain the producers used to derive the channel live state;
+      // leaving them open makes channels appear live after the broadcaster stops.
+      void mediaPost("/clients/disconnect", { clientId: socket.id }).catch(() => undefined);
 
       if (auth.role === "LISTENER") {
         const state = listenerStateBySocket.get(socket.id);
