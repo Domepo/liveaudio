@@ -25,6 +25,11 @@ INSERT OR IGNORE INTO "Session" ("id","name","description","imageUrl","broadcast
   ('dev-session-09','Seminar','Lehrabend','https://picsum.photos/seed/liveaudio-09/1200/600','100009','ACTIVE','dev-user-admin'),
   ('dev-session-10','Weihnachtsprobe','Musikteam Probe','https://picsum.photos/seed/liveaudio-10/1200/600','100010','ACTIVE','dev-user-admin');
 
+-- Keep the primary development session immediately broadcastable and make the
+-- real-microphone E2E flow independent from a developer's existing database.
+INSERT OR IGNORE INTO "Channel" ("id","sessionId","name","languageCode","isActive") VALUES
+  ('dev-channel-01-de','dev-session-01','Deutsch','de',1);
+
 INSERT OR IGNORE INTO "SessionUserAccess" ("id","sessionId","userId") VALUES
   ('dev-access-01','dev-session-01','dev-user-technik'),
   ('dev-access-02','dev-session-02','dev-user-technik'),

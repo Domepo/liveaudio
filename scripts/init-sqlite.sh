@@ -106,6 +106,11 @@ INSERT OR IGNORE INTO "Session" ("id","name","description","imageUrl","broadcast
 '
 
 sqlite3 "$DB_PATH" '
+INSERT OR IGNORE INTO "Channel" ("id","sessionId","name","languageCode","isActive") VALUES
+  ("dev-channel-01-de","dev-session-01","Deutsch","de",1);
+'
+
+sqlite3 "$DB_PATH" '
 INSERT OR IGNORE INTO "SessionUserAccess" ("id","sessionId","userId") VALUES
   ("dev-access-01","dev-session-01","dev-user-technik"),
   ("dev-access-02","dev-session-02","dev-user-technik"),
