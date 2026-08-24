@@ -14,6 +14,7 @@ import { loadAdminRoles, loadAdminUsers } from "./admin/users";
 import { loadBroadcastLog } from "./statistics";
 import { loadSelectedSession } from "./sessionDetail";
 import { refreshAudioInputs } from "./broadcaster/audioInputs";
+import { resumeBroadcastAfterWatchdogReload } from "./broadcaster/broadcast";
 import { restartStatsInterval } from "./statsInterval";
 import { validateJoin } from "./listener/join";
 import {
@@ -87,7 +88,8 @@ export async function initApp(): Promise<() => void> {
 
   if (get(app).isAdminRoute) {
     await loadAdminSession();
-    if (get(app).adminAuthenticated) {
+    const adminState = get(app);
+    if (adminState.adminAuthenticated && !adminState.mustChangeAdminPassword) {
       await loadAdminSessions();
       if (get(app).authenticatedRole === "ADMIN") {
         await loadAdminRoles();
@@ -101,6 +103,7 @@ export async function initApp(): Promise<() => void> {
       if (get(app).dashboardTab === "statistics") await loadBroadcastLog();
       if (get(app).adminView === "detail" && get(app).selectedSessionId && canAccessTab("sessions")) {
         await loadSelectedSession();
+        await resumeBroadcastAfterWatchdogReload();
       }
     }
   }

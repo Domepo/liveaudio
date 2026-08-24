@@ -1,5 +1,6 @@
 <script lang="ts">
   import { app } from "../../stores/app";
+  import BroadcasterAlert from "./BroadcasterAlert.svelte";
   import AdminSidebarMenu from "./AdminSidebarMenu.svelte";
   import AdminSessionDetail from "./AdminSessionDetail.svelte";
   import AdminTopHeader from "./AdminTopHeader.svelte";
@@ -21,6 +22,8 @@
     <AdminSidebarMenu />
 
     <section class="h-full rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+      <BroadcasterAlert />
+
       {#if $app.adminView === "detail"}
         <AdminSessionDetail />
       {:else if $app.dashboardTab === "statistics"}

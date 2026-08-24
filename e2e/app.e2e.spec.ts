@@ -108,6 +108,21 @@ test("login form validation and failed login status", async ({ page }) => {
   await expect(page.getByText(/Fehler:/)).toBeVisible();
 });
 
+test("session bookmark returns to live controls after login", async ({ page, context }) => {
+  await context.clearCookies();
+  await page.goto("/login/sessions/dev-session-01");
+
+  await expect(page.locator("#admin-name")).toBeVisible();
+  await page.locator("#admin-name").fill(CREDENTIALS.broadcaster.name);
+  await page.locator("#admin-password").fill(CREDENTIALS.broadcaster.password);
+  await page.getByRole("button", { name: "Anmelden" }).click();
+
+  await expect(page).toHaveURL(/\/login\/sessions\/dev-session-01$/);
+  await expect(page.getByRole("heading", { name: "Sonntag 09:30" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Steuerung" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("button", { name: "Jetzt live gehen" })).toBeVisible();
+});
+
 test("admin user management create, edit, delete", async ({ page }) => {
   const userName = uniqueId("e2e-user");
   const updatedUserName = `${userName}-edited`;

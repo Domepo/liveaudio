@@ -6,18 +6,21 @@ import { fetchJson } from "../../lib/http";
 import { app } from "../../stores/app";
 import { tr } from "../../i18n";
 import { setAdminStatus } from "../logging";
-import { goToAdminList } from "../routing";
+import { canAccessTab, goToAdminList, parseAdminSessionFromPath, restoreAdminSessionRoute } from "../routing";
 import { stopBroadcast } from "../broadcaster/broadcast";
 
 import { loadAdminRoles, loadAdminUsers } from "./users";
 import { loadAdminSession } from "./me";
 import { loadAdminSessions } from "./sessions";
 import { loadSelectedSession } from "../sessionDetail";
-import { canAccessTab } from "../routing";
 
 export async function adminLogin(): Promise<void> {
   const state = get(app);
   if (state.adminLoginInFlight) return;
+
+  // Keep the deep link stable while authentication and user data are loaded.
+  // This lets a bookmarked session continue directly to its live controls after login.
+  const requestedSessionId = parseAdminSessionFromPath(window.location.pathname) || state.selectedSessionId;
 
   app.update((s) => ({ ...s, adminLoginInFlight: true }));
   try {
@@ -50,7 +53,8 @@ export async function adminLogin(): Promise<void> {
     if (!canAccessTab(after.dashboardTab)) {
       app.update((s) => ({ ...s, dashboardTab: canAccessTab("sessions") ? "sessions" : "statistics" }));
     }
-    if (after.selectedSessionId) {
+    if (requestedSessionId && canAccessTab("sessions")) {
+      restoreAdminSessionRoute(requestedSessionId);
       await loadSelectedSession();
     }
   } catch (error) {

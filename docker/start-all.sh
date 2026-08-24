@@ -16,7 +16,8 @@ echo "[app] Applying prisma schema (db push)..."
 npx prisma db push --schema=/app/prisma/schema.postgres.prisma
 
 echo "[app] Starting MEDIA/API/WEB..."
-exec npx concurrently -n MEDIA,API,WEB -c blue,green,magenta \
-  "npm run dev:media" \
-  "npm run dev:api" \
-  "npm run dev:web"
+exec npx concurrently --kill-others -n MEDIA,API,WEB,WATCHDOG -c blue,green,magenta,yellow \
+  "npm run start -w @livevoice/media" \
+  "npm run start -w @livevoice/api" \
+  "node /app/docker/serve-web.cjs" \
+  "node /app/docker/watchdog.cjs"

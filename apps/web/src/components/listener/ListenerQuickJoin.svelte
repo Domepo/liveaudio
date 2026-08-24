@@ -39,7 +39,7 @@
             </div>
             <span
               class={`grid h-10 w-10 place-items-center rounded-full text-lg sm:h-12 sm:w-12 sm:text-xl ${
-                $app.activeListeningChannelId === channel.id && $app.isListening
+                $app.activeListeningChannelId === channel.id && $app.listenerWantsListen
                   ? "bg-orange-500 text-white"
                   : "bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-100"
               }`}
@@ -56,9 +56,9 @@
                   void toggleChannelPlayback(channel.id);
                 }
               }}
-              aria-label={$app.activeListeningChannelId === channel.id && $app.isListening ? $t("common.pause") : $t("common.play")}
+              aria-label={$app.activeListeningChannelId === channel.id && $app.listenerWantsListen ? $t("common.pause") : $t("common.play")}
             >
-              {#if $app.activeListeningChannelId === channel.id && $app.isListening}
+              {#if $app.activeListeningChannelId === channel.id && $app.listenerWantsListen}
                 <svg viewBox="0 0 24 24" class="h-6 w-6" aria-hidden="true">
                   <rect x="6.5" y="5" width="4.5" height="14" rx="1.5" fill="currentColor"></rect>
                   <rect x="13" y="5" width="4.5" height="14" rx="1.5" fill="currentColor"></rect>
@@ -75,7 +75,7 @@
               {channelIsLive(channel.id, "listener") ? $t("common.live") : $t("common.offline")}
             </p>
             <span class="text-[11px] text-slate-400 dark:text-slate-500">
-              {$app.activeListeningChannelId === channel.id && $app.isListening ? $t("common.playing") : $t("common.tap")}
+              {$app.activeListeningChannelId === channel.id && $app.listenerWantsListen ? $t("common.playing") : $t("common.tap")}
             </span>
           </div>
         </button>

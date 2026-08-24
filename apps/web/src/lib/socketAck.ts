@@ -25,15 +25,34 @@ export async function waitForSocketConnect(socket: Socket, timeoutMs: number): P
   });
 }
 
-export async function emitAck<T>(socket: Socket, event: string, payload: unknown): Promise<T> {
+export async function emitAck<T>(socket: Socket, event: string, payload: unknown, timeoutMs = 15_000): Promise<T> {
   return new Promise((resolve, reject) => {
-    socket.emit(event, payload, (response: { error?: string } & T) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.off("disconnect", onDisconnect);
+      callback();
+    };
+    const onDisconnect = (reason: string) => {
+      finish(() => reject(new Error(`Socket getrennt während ${event}: ${reason}`)));
+    };
+    const timer = setTimeout(() => {
+      finish(() => reject(new Error(`Keine Server-Antwort auf ${event} nach ${Math.round(timeoutMs / 1_000)} Sekunden`)));
+    }, timeoutMs);
+
+    socket.once("disconnect", onDisconnect);
+    socket.emit(event, payload, (response: ({ error?: string } & T) | undefined) => {
       if (response?.error) {
-        reject(new Error(response.error));
+        finish(() => reject(new Error(response.error)));
         return;
       }
-      resolve(response);
+      if (!response) {
+        finish(() => reject(new Error(`Leere Server-Antwort auf ${event}`)));
+        return;
+      }
+      finish(() => resolve(response));
     });
   });
 }
-

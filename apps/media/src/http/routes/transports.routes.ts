@@ -1,8 +1,9 @@
 import type { Express } from "express";
-import { connectTransport, disconnectClientTransports } from "../../services/transport.service";
+import { closeTransport, connectTransport, disconnectClientTransports } from "../../services/transport.service";
 
 type DisconnectBody = { clientId?: string };
 type ConnectBody = { clientId?: string; transportId: string; dtlsParameters: unknown };
+type CloseBody = { clientId?: string; transportId?: string };
 
 export function registerTransportRoutes(app: Express): void {
   app.post("/clients/disconnect", async (req, res) => {
@@ -27,6 +28,17 @@ export function registerTransportRoutes(app: Express): void {
     if (connected === "forbidden") {
       return res.status(403).json({ error: "Forbidden" });
     }
+    return res.json({ ok: true });
+  });
+
+  app.post("/transports/close", (req, res) => {
+    const { clientId, transportId } = req.body as CloseBody;
+    if (!clientId || typeof clientId !== "string" || !transportId || typeof transportId !== "string") {
+      return res.status(400).json({ error: "clientId and transportId are required" });
+    }
+    const closed = closeTransport(transportId, clientId);
+    if (closed === "not_found") return res.status(404).json({ error: "Transport not found" });
+    if (closed === "forbidden") return res.status(403).json({ error: "Forbidden" });
     return res.json({ ok: true });
   });
 }

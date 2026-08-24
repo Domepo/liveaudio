@@ -16,6 +16,16 @@ export function parseAdminSessionFromPath(pathname: string): string {
   }
 }
 
+export function adminSessionPath(sessionId: string): string {
+  return `/login/sessions/${encodeURIComponent(sessionId)}`;
+}
+
+export function restoreAdminSessionRoute(sessionId: string): void {
+  if (!sessionId) return;
+  history.replaceState({}, "", adminSessionPath(sessionId));
+  syncRoute();
+}
+
 export function syncRoute(): void {
   const pathname = window.location.pathname;
   if (pathname.startsWith("/admin")) {
@@ -122,7 +132,7 @@ export function goToDashboard(): void {
 }
 
 export function goToAdminSession(sessionId: string): void {
-  history.pushState({}, "", `/login/sessions/${encodeURIComponent(sessionId)}`);
+  history.pushState({}, "", adminSessionPath(sessionId));
   syncRoute();
   void loadSelectedSession();
 }

@@ -13,7 +13,7 @@
     "dev:web": "npm run dev -w @livevoice/web",
     "build": "npm run build -ws",
     "test": "npm run test:unit && npm run test:e2e",
-    "test:unit": "npm run test -w @livevoice/api && npm run test -w @livevoice/web",
+    "test:unit": "npm run test -w @livevoice/api && npm run test -w @livevoice/media && npm run test -w @livevoice/web",
     "test:e2e:prepare": "npm run build -w @livevoice/api && npm run build -w @livevoice/web",
     "start:test:api": "npm run start -w @livevoice/api",
     "start:test:web": "npm run preview -w @livevoice/web -- --host 127.0.0.1 --port 4173",

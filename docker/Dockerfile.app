@@ -24,7 +24,12 @@ RUN npm install
 
 COPY . .
 RUN npx prisma generate --schema=/app/prisma/schema.postgres.prisma
+RUN npm run build
+ENV NODE_ENV=production
+ENV RUNNING_IN_DOCKER=1
 
 RUN chmod +x /app/docker/start-all.sh
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 CMD ["node", "/app/docker/healthcheck.cjs"]
 
 CMD ["/app/docker/start-all.sh"]

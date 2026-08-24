@@ -9,7 +9,11 @@ import { registerStatsRoutes } from "./routes/stats.routes";
 import { registerTransportRoutes } from "./routes/transports.routes";
 
 export function registerRoutes(app: Express): void {
-  const protectedLimiter = createSimpleRateLimit(120, 60_000);
+  // These routes are reachable only by the authenticated API service. A
+  // broadcaster recovery can legitimately reconnect every listener at once;
+  // 120 requests/minute was too low for 20+ listeners and caused cleanup calls
+  // themselves to be rejected with 429, leaving media resources behind.
+  const protectedLimiter = createSimpleRateLimit(1_000, 60_000);
   const protectedPaths = [
     "/broadcasters/transport",
     "/broadcasters/produce",
@@ -17,8 +21,10 @@ export function registerRoutes(app: Express): void {
     "/listeners/transport",
     "/listeners/consume",
     "/transports/connect",
+    "/transports/close",
     "/clients/disconnect",
-    "/consumers/resume"
+    "/consumers/resume",
+    "/consumers/close"
   ];
   for (const path of protectedPaths) {
     app.use(path, requireInternalApiToken, protectedLimiter);

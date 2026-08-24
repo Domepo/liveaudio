@@ -54,9 +54,25 @@ export const mediaCodecs: RouterRtpCodecCapability[] = [
 
 export function assertMediaSecurityConfig(): void {
   if (process.env.NODE_ENV !== "production") return;
+  const errors: string[] = [];
+  const announcedIpFromEnv = process.env.MEDIA_ANNOUNCED_IP?.trim() || "";
+  const invalidAnnouncedAddresses = new Set(["127.0.0.1", "0.0.0.0", "localhost", "::1", "::"]);
+
   if (!MEDIA_INTERNAL_TOKEN || MEDIA_INTERNAL_TOKEN.length < 24) {
-    // eslint-disable-next-line no-console
-    console.error("[SECURITY] MEDIA_INTERNAL_TOKEN is missing/weak. Set a random token with at least 24 chars.");
+    errors.push("MEDIA_INTERNAL_TOKEN is missing/weak. Set a random token with at least 24 chars.");
+  }
+  if (!announcedIpFromEnv || invalidAnnouncedAddresses.has(announcedIpFromEnv.toLowerCase())) {
+    errors.push("MEDIA_ANNOUNCED_IP must be the externally reachable server IP, not localhost or a wildcard address.");
+  }
+  if (!Number.isInteger(RTC_MIN_PORT) || !Number.isInteger(RTC_MAX_PORT) || RTC_MIN_PORT < 1 || RTC_MAX_PORT > 65535 || RTC_MIN_PORT > RTC_MAX_PORT) {
+    errors.push("RTC_MIN_PORT/RTC_MAX_PORT define an invalid port range.");
+  }
+
+  if (errors.length) {
+    for (const error of errors) {
+      // eslint-disable-next-line no-console
+      console.error(`[SECURITY] ${error}`);
+    }
     process.exit(1);
   }
 }

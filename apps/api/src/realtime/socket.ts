@@ -9,6 +9,12 @@ type BroadcasterSocketAuth = { role: "BROADCASTER"; sessionId: string; userId?: 
 type SocketAuthPayload = ListenerSocketAuth | BroadcasterSocketAuth;
 type SessionLiveMode = "none" | "mic" | "preshow" | "testtone";
 
+// Socket.IO and ICE recovery can take several seconds after a Wi-Fi change.
+// Keep the existing mediasoup producer alive long enough for the broadcaster
+// to reconnect instead of turning a transient network interruption into an
+// OFFLINE event for every listener.
+export const BROADCASTER_DISCONNECT_GRACE_MS = 15_000;
+
 type SocketDeps = {
   io: Server;
   prisma: PrismaClient;
@@ -84,6 +90,30 @@ export function registerSocketRealtime(deps: SocketDeps): void {
     return response.data;
   };
 
+  const broadcasterStopTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const explicitlyStoppedSockets = new Set<string>();
+  const finalizeBroadcastStop = (sessionId: string): void => {
+    clearSessionLiveMode(sessionId);
+    testToneWatchdogStore.clearSession(sessionId);
+    io.to(`session:${sessionId}`).emit("broadcast:liveModeChanged", { sessionId, mode: "none" });
+    void recordAnalyticsPoint({ sessionId, metric: "events_broadcast_stop", value: 1 });
+  };
+  const scheduleBroadcasterDisconnectCleanup = (sessionId: string, socketId: string): void => {
+    setTimeout(() => {
+      void mediaPost("/clients/disconnect", { clientId: socketId }).catch(() => undefined);
+    }, BROADCASTER_DISCONNECT_GRACE_MS);
+
+    const existing = broadcasterStopTimers.get(sessionId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      broadcasterStopTimers.delete(sessionId);
+      if ((broadcasterSocketsBySession.get(sessionId)?.size ?? 0) === 0) {
+        finalizeBroadcastStop(sessionId);
+      }
+    }, BROADCASTER_DISCONNECT_GRACE_MS);
+    broadcasterStopTimers.set(sessionId, timer);
+  };
+
   registerSocketAuth({
     io,
     prisma,
@@ -108,6 +138,12 @@ export function registerSocketRealtime(deps: SocketDeps): void {
       recordLiveSnapshot(auth.sessionId);
       socket.emit("broadcast:liveModeChanged", { sessionId: auth.sessionId, mode: getSessionLiveMode(auth.sessionId) });
     } else {
+      const pendingStopTimer = broadcasterStopTimers.get(auth.sessionId);
+      const hadBroadcaster = Boolean(pendingStopTimer) || (broadcasterSocketsBySession.get(auth.sessionId)?.size ?? 0) > 0;
+      if (pendingStopTimer) {
+        clearTimeout(pendingStopTimer);
+        broadcasterStopTimers.delete(auth.sessionId);
+      }
       setBroadcastOwner(auth.sessionId, { socketId: socket.id, userId: auth.userId, userName: auth.userName, connectedAt: Date.now() });
       io.to(`session:${auth.sessionId}`).emit("broadcast:ownershipChanged", {
         sessionId: auth.sessionId,
@@ -115,7 +151,6 @@ export function registerSocketRealtime(deps: SocketDeps): void {
         ownerUserId: auth.userId,
         startedAt: new Date().toISOString()
       });
-      const hadBroadcaster = (broadcasterSocketsBySession.get(auth.sessionId)?.size ?? 0) > 0;
       addSocketToRoleMap(broadcasterSocketsBySession, auth.sessionId, socket.id);
       if (!hadBroadcaster) {
         void (async () => {
@@ -128,10 +163,12 @@ export function registerSocketRealtime(deps: SocketDeps): void {
     }
 
     socket.on("disconnect", () => {
-      // Always close the media transports owned by this socket. Broadcaster
-      // transports contain the producers used to derive the channel live state;
-      // leaving them open makes channels appear live after the broadcaster stops.
-      void mediaPost("/clients/disconnect", { clientId: socket.id }).catch(() => undefined);
+      const explicitlyStopped = auth.role === "BROADCASTER" && explicitlyStoppedSockets.delete(socket.id);
+      if (auth.role === "LISTENER") {
+        void mediaPost("/clients/disconnect", { clientId: socket.id }).catch(() => undefined);
+      } else if (!explicitlyStopped) {
+        scheduleBroadcasterDisconnectCleanup(auth.sessionId, socket.id);
+      }
 
       if (auth.role === "LISTENER") {
         const state = listenerStateBySocket.get(socket.id);
@@ -156,11 +193,8 @@ export function registerSocketRealtime(deps: SocketDeps): void {
           clearBroadcastOwner(auth.sessionId);
           io.to(`session:${auth.sessionId}`).emit("broadcast:ownerDisconnected", { sessionId: auth.sessionId });
         }
-        if ((broadcasterSocketsBySession.get(auth.sessionId)?.size ?? 0) === 0) {
-          clearSessionLiveMode(auth.sessionId);
-          testToneWatchdogStore.clearSession(auth.sessionId);
-          io.to(`session:${auth.sessionId}`).emit("broadcast:liveModeChanged", { sessionId: auth.sessionId, mode: "none" });
-          void recordAnalyticsPoint({ sessionId: auth.sessionId, metric: "events_broadcast_stop", value: 1 });
+        if (explicitlyStopped && (broadcasterSocketsBySession.get(auth.sessionId)?.size ?? 0) === 0) {
+          finalizeBroadcastStop(auth.sessionId);
         }
       }
     });
@@ -228,6 +262,16 @@ export function registerSocketRealtime(deps: SocketDeps): void {
       }
     });
 
+    socket.on("transport:close", async ({ transportId }, cb) => {
+      try {
+        await mediaPost("/transports/close", { clientId: socket.id, transportId });
+        cb({ ok: true });
+      } catch (error) {
+        if (axios.isAxiosError(error) && error.response?.status === 404) return cb({ ok: true });
+        cb({ error: "Transport close failed" });
+      }
+    });
+
     socket.on("broadcaster:produce", async ({ transportId, sessionId, channelId, rtpParameters }, cb) => {
       if (auth.role !== "BROADCASTER") return cb({ error: "Forbidden" });
       if (auth.sessionId !== sessionId) return cb({ error: "Invalid session" });
@@ -239,6 +283,18 @@ export function registerSocketRealtime(deps: SocketDeps): void {
         cb(response);
       } catch {
         cb({ error: "Produce failed" });
+      }
+    });
+
+    socket.on("broadcaster:stop", async ({ sessionId }, cb) => {
+      if (auth.role !== "BROADCASTER") return cb({ error: "Forbidden" });
+      if (auth.sessionId !== sessionId) return cb({ error: "Invalid session" });
+      try {
+        await mediaPost("/clients/disconnect", { clientId: socket.id });
+        explicitlyStoppedSockets.add(socket.id);
+        cb({ ok: true });
+      } catch {
+        cb({ error: "Broadcast stop failed" });
       }
     });
 
@@ -295,6 +351,16 @@ export function registerSocketRealtime(deps: SocketDeps): void {
         cb(await mediaPost("/consumers/resume", { clientId: socket.id, consumerId }));
       } catch {
         cb({ error: "Resume failed" });
+      }
+    });
+
+    socket.on("consumer:close", async ({ consumerId }, cb) => {
+      try {
+        cb(await mediaPost("/consumers/close", { clientId: socket.id, consumerId }));
+      } catch (error) {
+        const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+        if (status === 404) return cb({ ok: true });
+        cb({ error: "Consumer close failed" });
       }
     });
   });

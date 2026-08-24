@@ -6,10 +6,25 @@ import { apiUrl, wsUrl } from "../../lib/config";
 import { fetchJson } from "../../lib/http";
 import { tr } from "../../i18n";
 import { emitAck, waitForSocketConnect } from "../../lib/socketAck";
+import { getUserMediaWithTimeout } from "../../lib/media";
 import { app } from "../../stores/app";
 import { setStatus } from "../logging";
 import { attachLevelMeter, stopLevelMeters } from "./levelMeters";
 import { refreshAudioInputs } from "./audioInputs";
+import {
+  BROADCASTER_HEALTH_BAD_SAMPLES_BEFORE_RECOVERY,
+  BROADCASTER_HEALTH_POLL_MS,
+  BROADCASTER_WATCHDOG_MAX_RELOADS_PER_WINDOW,
+  BROADCASTER_WATCHDOG_RECOVERIES_BEFORE_RELOAD,
+  BROADCASTER_WATCHDOG_RECOVERY_WINDOW_MS,
+  BROADCASTER_WATCHDOG_RELOAD_WINDOW_MS,
+  calculateOutboundAudioMetrics,
+  evaluateOutboundAudioHealth,
+  snapshotOutboundAudioStats,
+  summarizeOutboundAudioQuality,
+  type OutboundAudioMetrics,
+  type OutboundAudioSnapshot
+} from "./healthWatchdog";
 import { loadSessionRecordings, startRecording, stopRecording } from "../recording";
 import { refreshSessionStats } from "../sessionDetail/stats";
 import {
@@ -32,6 +47,71 @@ let preShowAutoSwitchTimer: ReturnType<typeof setTimeout> | null = null;
 let testToneAudioContext: AudioContext | null = null;
 let testToneCleanup: (() => void) | null = null;
 const SWITCH_SETTLE_MS = 250;
+type ActiveOutputMode = "mic" | "preshow" | "testtone";
+type SendTransport = ReturnType<Device["createSendTransport"]>;
+type MediaProducer = Awaited<ReturnType<SendTransport["produce"]>>;
+type SendBinding = { transportId: string; transport: SendTransport; producer: MediaProducer };
+
+const activeChannelTracks = new Map<string, MediaStreamTrack>();
+const activeSendBindings = new Map<string, SendBinding>();
+let broadcasterRecoveryInFlight = false;
+let broadcasterHealthTimer: ReturnType<typeof setInterval> | null = null;
+let broadcasterHealthCheckInFlight = false;
+let watchdogRecoveryTimes: number[] = [];
+let broadcasterAlertClearTimer: ReturnType<typeof setTimeout> | null = null;
+const channelHealthSnapshots = new Map<string, OutboundAudioSnapshot>();
+const channelBadHealthSamples = new Map<string, number>();
+const WATCHDOG_RELOAD_INTENT_KEY = "livevoice-broadcaster-watchdog-reload-intent";
+const WATCHDOG_RELOAD_HISTORY_KEY = "livevoice-broadcaster-watchdog-reload-history";
+
+type WatchdogReloadIntent = {
+  sessionId: string;
+  mode: ActiveOutputMode;
+  selectedPreShowTrackId: string;
+  reason: string;
+  expiresAt: number;
+};
+
+function clearBroadcasterAlertTimer(): void {
+  if (!broadcasterAlertClearTimer) return;
+  clearTimeout(broadcasterAlertClearTimer);
+  broadcasterAlertClearTimer = null;
+}
+
+function showBroadcasterAlert(
+  level: "warning" | "critical" | "success",
+  title: string,
+  message: string,
+  action?: string,
+  clearAfterMs?: number
+): void {
+  clearBroadcasterAlertTimer();
+  app.update((state) => ({
+    ...state,
+    broadcasterAlert: { level, title, message, action, at: new Date().toISOString() }
+  }));
+  if (clearAfterMs) {
+    broadcasterAlertClearTimer = setTimeout(() => {
+      broadcasterAlertClearTimer = null;
+      app.update((state) => ({ ...state, broadcasterAlert: null }));
+    }, clearAfterMs);
+  }
+}
+
+function showBroadcasterWarning(reason: string): void {
+  if (get(app).broadcasterAlert?.level === "critical") return;
+  showBroadcasterAlert(
+    "warning",
+    "Audioverbindung instabil",
+    `Der Audio-Watchdog hat eine Störung erkannt: ${reason}.`,
+    "Die Verbindung wird automatisch repariert. Bitte die Senderseite geöffnet lassen."
+  );
+}
+
+function clearBroadcasterAlert(): void {
+  clearBroadcasterAlertTimer();
+  app.update((state) => ({ ...state, broadcasterAlert: null }));
+}
 
 async function waitForSwitchSettle(): Promise<void> {
   await new Promise((resolve) => window.setTimeout(resolve, SWITCH_SETTLE_MS));
@@ -222,10 +302,16 @@ async function createBroadcasterSocket(sessionId: string, sessionCode: string) {
     }
     if (s.isBroadcasting) {
       setStatus("broadcaster", tr("broadcast.signaling_disconnected_live", { reason: String(reason) }));
+      scheduleBroadcasterRecovery(String(reason));
       return;
     }
     if (s.isPreshowMusicActive) {
       setStatus("broadcaster", tr("broadcast.signaling_disconnected_preshow", { reason: String(reason) }));
+      scheduleBroadcasterRecovery(String(reason));
+      return;
+    }
+    if (s.isTestToneActive) {
+      scheduleBroadcasterRecovery(String(reason));
     }
   });
 
@@ -258,10 +344,16 @@ async function createBroadcasterSocket(sessionId: string, sessionCode: string) {
     app.update((prev) => ({ ...prev, broadcastOccupiedByOther: false, broadcastOwnerName: "", broadcastOwnerStartedAt: "" }));
     if (s.isBroadcasting) {
       setStatus("broadcaster", tr("broadcast.signaling_connected"));
+      scheduleBroadcasterRecovery("signaling reconnected");
       return;
     }
     if (s.isPreshowMusicActive) {
       setStatus("broadcaster", tr("broadcast.preshow_connected"));
+      scheduleBroadcasterRecovery("signaling reconnected");
+      return;
+    }
+    if (s.isTestToneActive) {
+      scheduleBroadcasterRecovery("signaling reconnected");
     }
   });
 
@@ -287,70 +379,388 @@ async function setLiveMode(mode: "none" | "mic" | "preshow" | "testtone"): Promi
   }
 }
 
+function getActiveOutputMode(): ActiveOutputMode | null {
+  const state = get(app);
+  if (state.isBroadcasting) return "mic";
+  if (state.isPreshowMusicActive) return "preshow";
+  if (state.isTestToneActive) return "testtone";
+  return null;
+}
+
+function closeSendBinding(binding: SendBinding): void {
+  const socket = broadcasterSocket;
+  if (socket?.connected) {
+    void emitAck(socket, "transport:close", { transportId: binding.transportId }).catch(() => undefined);
+  }
+  try {
+    binding.producer.close();
+  } catch {
+    // ignore cleanup error
+  }
+  try {
+    binding.transport.close();
+  } catch {
+    // ignore cleanup error
+  }
+}
+
+function replaceActiveSendBinding(channelId: string, binding: SendBinding): void {
+  const previous = activeSendBindings.get(channelId);
+  activeSendBindings.set(channelId, binding);
+  channelHealthSnapshots.delete(channelId);
+  channelBadHealthSamples.delete(channelId);
+  if (previous) closeSendBinding(previous);
+}
+
+function closeActiveSendBindings(): void {
+  const bindings = [...activeSendBindings.values()];
+  activeSendBindings.clear();
+  bindings.forEach(closeSendBinding);
+}
+
+function stopBroadcasterHealthWatchdog(): void {
+  if (broadcasterHealthTimer) {
+    clearInterval(broadcasterHealthTimer);
+    broadcasterHealthTimer = null;
+  }
+  broadcasterHealthCheckInFlight = false;
+  watchdogRecoveryTimes = [];
+  channelHealthSnapshots.clear();
+  channelBadHealthSamples.clear();
+  app.update((state) => ({
+    ...state,
+    broadcasterQuality: {
+      state: "idle",
+      packetLossPercent: null,
+      jitterMs: null,
+      roundTripMs: null,
+      updatedAt: ""
+    }
+  }));
+}
+
+function readWatchdogReloadHistory(): number[] {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(WATCHDOG_RELOAD_HISTORY_KEY) ?? "[]") as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  } catch {
+    return [];
+  }
+}
+
+function requestWatchdogReload(reason: string): boolean {
+  const state = get(app);
+  const mode = getActiveOutputMode();
+  if (!state.broadcasterWantsBroadcast || !state.selectedSessionId || !mode) return false;
+
+  const now = Date.now();
+  const recentReloads = readWatchdogReloadHistory().filter((at) => now - at < BROADCASTER_WATCHDOG_RELOAD_WINDOW_MS);
+  if (recentReloads.length >= BROADCASTER_WATCHDOG_MAX_RELOADS_PER_WINDOW) {
+    setStatus("broadcaster", `Audio-Watchdog: automatischer Reload begrenzt (${reason}). Verbindung wird weiter repariert …`);
+    showBroadcasterAlert(
+      "critical",
+      "Audio weiterhin gestört",
+      `Mehrere automatische Neustarts waren nötig: ${reason}.`,
+      "Die Verbindung wird weiter repariert. Falls die Warnung bleibt, bitte Mikrofon, Browser und Netzwerk prüfen."
+    );
+    return false;
+  }
+
+  const intent: WatchdogReloadIntent = {
+    sessionId: state.selectedSessionId,
+    mode,
+    selectedPreShowTrackId: state.selectedPreShowTrackId,
+    reason,
+    expiresAt: now + 2 * 60_000
+  };
+  try {
+    sessionStorage.setItem(WATCHDOG_RELOAD_HISTORY_KEY, JSON.stringify([...recentReloads, now]));
+    sessionStorage.setItem(WATCHDOG_RELOAD_INTENT_KEY, JSON.stringify(intent));
+  } catch {
+    return false;
+  }
+
+  setStatus("broadcaster", `Audio-Watchdog lädt die Senderseite neu (${reason}) …`);
+  showBroadcasterAlert(
+    "critical",
+    "Automatischer Sender-Neustart",
+    `Die Audioverbindung ist wiederholt ausgefallen: ${reason}.`,
+    "Die Senderseite lädt jetzt neu und startet den Stream automatisch wieder."
+  );
+  history.replaceState({}, "", `/login/sessions/${encodeURIComponent(state.selectedSessionId)}`);
+  window.setTimeout(() => window.location.reload(), 100);
+  return true;
+}
+
+function requestWatchdogRecovery(reason: string): void {
+  if (broadcasterReconnectTimer || broadcasterRecoveryInFlight) return;
+  const now = Date.now();
+  watchdogRecoveryTimes = watchdogRecoveryTimes.filter((at) => now - at < BROADCASTER_WATCHDOG_RECOVERY_WINDOW_MS);
+  watchdogRecoveryTimes.push(now);
+
+  if (watchdogRecoveryTimes.length >= BROADCASTER_WATCHDOG_RECOVERIES_BEFORE_RELOAD && requestWatchdogReload(reason)) {
+    return;
+  }
+  scheduleBroadcasterRecovery(`Audio-Watchdog: ${reason}`);
+}
+
+async function checkBroadcasterAudioHealth(): Promise<void> {
+  if (broadcasterHealthCheckInFlight) return;
+  const state = get(app);
+  if (!state.broadcasterWantsBroadcast || !getActiveOutputMode()) return;
+
+  broadcasterHealthCheckInFlight = true;
+  try {
+    const bindings = [...activeSendBindings.entries()];
+    if (bindings.length === 0) {
+      requestWatchdogRecovery("kein aktiver Audiotransport");
+      return;
+    }
+
+    const findings = await Promise.all(
+      bindings.map(async ([channelId, binding]) => {
+        const track = activeChannelTracks.get(channelId);
+        if (!track || track.readyState === "ended") {
+          return { channelId, unhealthy: true, reason: "Mikrofon-Track beendet", immediate: true };
+        }
+        if (track.muted || !track.enabled) {
+          return { channelId, unhealthy: true, reason: "Mikrofon-Track liefert keine Daten", immediate: false };
+        }
+
+        try {
+          const previous = channelHealthSnapshots.get(channelId) ?? null;
+          const snapshot = snapshotOutboundAudioStats(await binding.producer.getStats());
+          const health = evaluateOutboundAudioHealth(previous, snapshot);
+          const metrics = calculateOutboundAudioMetrics(previous, snapshot);
+          channelHealthSnapshots.set(channelId, snapshot);
+          return { channelId, unhealthy: health.state !== "healthy", reason: health.reason, immediate: false, metrics };
+        } catch {
+          return { channelId, unhealthy: true, reason: "WebRTC-Statistik nicht erreichbar", immediate: false };
+        }
+      })
+    );
+
+    const metrics = findings
+      .map((finding) => ("metrics" in finding ? finding.metrics : null))
+      .filter((sample): sample is OutboundAudioMetrics => sample !== null);
+    const quality = summarizeOutboundAudioQuality(metrics);
+    app.update((current) => ({
+      ...current,
+      broadcasterQuality: {
+        ...quality,
+        state: findings.some((finding) => finding.unhealthy) ? "poor" : quality.state,
+        packetLossPercent: quality.packetLossPercent === null ? null : Number(quality.packetLossPercent.toFixed(1)),
+        jitterMs: quality.jitterMs === null ? null : Math.round(quality.jitterMs),
+        roundTripMs: quality.roundTripMs === null ? null : Math.round(quality.roundTripMs),
+        updatedAt: new Date().toISOString()
+      }
+    }));
+
+    for (const finding of findings) {
+      if (!finding.unhealthy) {
+        channelBadHealthSamples.set(finding.channelId, 0);
+        continue;
+      }
+
+      const badSamples = finding.immediate ? BROADCASTER_HEALTH_BAD_SAMPLES_BEFORE_RECOVERY : (channelBadHealthSamples.get(finding.channelId) ?? 0) + 1;
+      channelBadHealthSamples.set(finding.channelId, badSamples);
+      if (badSamples >= BROADCASTER_HEALTH_BAD_SAMPLES_BEFORE_RECOVERY) {
+        channelBadHealthSamples.set(finding.channelId, 0);
+        requestWatchdogRecovery(finding.reason);
+        break;
+      }
+    }
+  } finally {
+    broadcasterHealthCheckInFlight = false;
+  }
+}
+
+function startBroadcasterHealthWatchdog(): void {
+  if (broadcasterHealthTimer) return;
+  app.update((state) => ({
+    ...state,
+    broadcasterQuality: {
+      state: "measuring",
+      packetLossPercent: null,
+      jitterMs: null,
+      roundTripMs: null,
+      updatedAt: new Date().toISOString()
+    }
+  }));
+  broadcasterHealthTimer = setInterval(() => {
+    void checkBroadcasterAudioHealth();
+  }, BROADCASTER_HEALTH_POLL_MS);
+}
+
+function scheduleBroadcasterRecovery(reason: string): void {
+  const state = get(app);
+  if (!state.broadcasterWantsBroadcast || !getActiveOutputMode() || broadcasterReconnectTimer || broadcasterRecoveryInFlight) return;
+  const delay = Math.min(5_000, 250 * 2 ** Math.min(state.broadcasterReconnectAttempts, 5));
+  setStatus("broadcaster", `Verbindung wird wiederhergestellt (${reason}) …`);
+  showBroadcasterWarning(reason);
+  app.update((current) => ({
+    ...current,
+    broadcasterQuality: { ...current.broadcasterQuality, state: "poor", updatedAt: new Date().toISOString() }
+  }));
+  setBroadcasterReconnectTimer(
+    setTimeout(() => {
+      setBroadcasterReconnectTimer(null);
+      void recoverBroadcasterOutput(reason);
+    }, delay)
+  );
+}
+
+async function captureMicTrack(channel: { id: string; name: string }): Promise<MediaStreamTrack> {
+  const selectedDeviceId = get(app).channelInputAssignments[channel.id] ?? "";
+  const constraints: MediaTrackConstraints = selectedDeviceId
+    ? { deviceId: { exact: selectedDeviceId }, autoGainControl: true, noiseSuppression: true, echoCancellation: true }
+    : { autoGainControl: true, noiseSuppression: true, echoCancellation: true };
+  const stream = await getUserMediaWithTimeout({ audio: constraints, video: false });
+  const track = stream.getAudioTracks()[0];
+  if (!track) throw new Error("Kein Audio-Track vorhanden.");
+  setBroadcasterChannelStreams([...broadcasterChannelStreams, { channelId: channel.id, channelName: channel.name, stream }]);
+  activeChannelTracks.set(channel.id, track);
+  await attachLevelMeter(channel.id, stream);
+  return track;
+}
+
+async function createChannelSendBinding(
+  socket: ReturnType<typeof io>,
+  device: Device,
+  channel: { id: string; name: string },
+  track: MediaStreamTrack
+): Promise<SendBinding> {
+  const transportData = await emitAck<{
+    transportId: string;
+    iceParameters: unknown;
+    iceCandidates: unknown[];
+    dtlsParameters: unknown;
+  }>(socket, "broadcaster:createTransport", { sessionId: get(app).selectedSessionId, channelId: channel.id });
+
+  const sendTransport = device.createSendTransport({
+    id: transportData.transportId,
+    iceParameters: transportData.iceParameters as never,
+    iceCandidates: transportData.iceCandidates as never,
+    dtlsParameters: transportData.dtlsParameters as never
+  });
+  sendTransport.on("connect", async ({ dtlsParameters }, callback, errback) => {
+    try {
+      await emitAck(socket, "transport:connect", { transportId: transportData.transportId, dtlsParameters });
+      callback();
+    } catch (error) {
+      errback(error as Error);
+    }
+  });
+  sendTransport.on("produce", async ({ kind, rtpParameters }, callback, errback) => {
+    try {
+      const response = await emitAck<{ producerId: string }>(socket, "broadcaster:produce", {
+        transportId: transportData.transportId,
+        sessionId: get(app).selectedSessionId,
+        channelId: channel.id,
+        kind,
+        rtpParameters
+      });
+      callback({ id: response.producerId });
+    } catch (error) {
+      errback(error as Error);
+    }
+  });
+  sendTransport.on("connectionstatechange", (connectionState) => {
+    if (connectionState === "failed" || connectionState === "disconnected") {
+      scheduleBroadcasterRecovery(`transport ${connectionState}`);
+    }
+  });
+
+  try {
+    const producer = await sendTransport.produce({ track, stopTracks: false });
+    return { transportId: transportData.transportId, transport: sendTransport, producer };
+  } catch (error) {
+    sendTransport.close();
+    throw error;
+  }
+}
+
+async function recoverBroadcasterOutput(reason: string): Promise<void> {
+  if (broadcasterRecoveryInFlight) return;
+  const initialState = get(app);
+  const mode = getActiveOutputMode();
+  if (!initialState.broadcasterWantsBroadcast || !mode) return;
+
+  broadcasterRecoveryInFlight = true;
+  let shouldRetry = false;
+  try {
+    const socket = broadcasterSocket;
+    if (!socket?.connected) throw new Error("Signaling noch nicht verbunden");
+    const device = await loadDeviceForSocket(socket);
+    const failed: string[] = [];
+    let recovered = 0;
+
+    for (const channel of get(app).channels) {
+      try {
+        let track = activeChannelTracks.get(channel.id);
+        if ((!track || track.readyState === "ended") && mode === "mic") {
+          track = await captureMicTrack(channel);
+        }
+        if (!track || track.readyState === "ended") throw new Error("Audio-Track nicht verfügbar");
+        const binding = await createChannelSendBinding(socket, device, channel, track);
+        replaceActiveSendBinding(channel.id, binding);
+        recovered += 1;
+      } catch {
+        failed.push(channel.name);
+      }
+    }
+
+    if (recovered === 0 || failed.length > 0) {
+      throw new Error(failed.length > 0 ? `Kanäle fehlgeschlagen: ${failed.join(", ")}` : "Kein Kanal konnte wiederhergestellt werden");
+    }
+
+    await setLiveMode(mode);
+    app.update((state) => ({ ...state, broadcasterReconnectAttempts: 0 }));
+    setStatus("broadcaster", `Verbindung wiederhergestellt (${recovered} Kanal/Kanäle).`);
+    showBroadcasterAlert(
+      "success",
+      "Audioverbindung wiederhergestellt",
+      `${recovered} Kanal/Kanäle senden wieder stabil.`,
+      undefined,
+      10_000
+    );
+    app.update((current) => ({
+      ...current,
+      broadcasterQuality: {
+        state: "measuring",
+        packetLossPercent: null,
+        jitterMs: null,
+        roundTripMs: null,
+        updatedAt: new Date().toISOString()
+      }
+    }));
+    await refreshSessionStats();
+  } catch (error) {
+    shouldRetry = get(app).broadcasterWantsBroadcast && Boolean(getActiveOutputMode());
+    app.update((state) => ({ ...state, broadcasterReconnectAttempts: state.broadcasterReconnectAttempts + 1 }));
+    setStatus("broadcaster", `Wiederherstellung fehlgeschlagen: ${(error as Error).message}`);
+    showBroadcasterWarning(`${reason}; Wiederherstellung fehlgeschlagen: ${(error as Error).message}`);
+  } finally {
+    broadcasterRecoveryInFlight = false;
+    if (shouldRetry) scheduleBroadcasterRecovery(reason);
+  }
+}
+
 type ProduceResult = { produced: string[]; failed: string[] };
 
 async function produceMicToChannels(socket: ReturnType<typeof io>, device: Device): Promise<ProduceResult> {
   const produced: string[] = [];
   const failed: string[] = [];
-  const streams = [...broadcasterChannelStreams];
 
   for (const channel of get(app).channels) {
     try {
-      const selectedDeviceId = get(app).channelInputAssignments[channel.id] ?? "";
-      const constraints: MediaTrackConstraints = selectedDeviceId
-        ? { deviceId: { exact: selectedDeviceId }, autoGainControl: true, noiseSuppression: true, echoCancellation: true }
-        : { autoGainControl: true, noiseSuppression: true, echoCancellation: true };
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: constraints, video: false });
-      streams.push({ channelId: channel.id, channelName: channel.name, stream });
-      setBroadcasterChannelStreams(streams);
-
-      await attachLevelMeter(channel.id, stream);
-      const track = stream.getAudioTracks()[0];
-      if (!track) throw new Error("Kein Audio-Track vorhanden.");
-
-      const transportData = await emitAck<{
-        transportId: string;
-        iceParameters: unknown;
-        iceCandidates: unknown[];
-        dtlsParameters: unknown;
-      }>(socket, "broadcaster:createTransport", { sessionId: get(app).selectedSessionId, channelId: channel.id });
-
-      const sendTransport = device.createSendTransport({
-        id: transportData.transportId,
-        iceParameters: transportData.iceParameters as never,
-        iceCandidates: transportData.iceCandidates as never,
-        dtlsParameters: transportData.dtlsParameters as never
-      });
-
-      sendTransport.on("connect", async ({ dtlsParameters }, callback, errback) => {
-        try {
-          await emitAck(socket, "transport:connect", { transportId: transportData.transportId, dtlsParameters });
-          callback();
-        } catch (error) {
-          errback(error as Error);
-        }
-      });
-
-      sendTransport.on("produce", async ({ kind, rtpParameters }, callback, errback) => {
-        try {
-          const producerResponse = await emitAck<{ producerId: string }>(socket, "broadcaster:produce", {
-            transportId: transportData.transportId,
-            sessionId: get(app).selectedSessionId,
-            channelId: channel.id,
-            kind,
-            rtpParameters
-          });
-          callback({ id: producerResponse.producerId });
-        } catch (error) {
-          errback(error as Error);
-        }
-      });
-
-      await sendTransport.produce({ track });
+      const track = await captureMicTrack(channel);
+      const binding = await createChannelSendBinding(socket, device, channel, track);
+      replaceActiveSendBinding(channel.id, binding);
       produced.push(channel.name);
-    } catch {
-      failed.push(channel.name);
+    } catch (error) {
+      failed.push(`${channel.name}: ${(error as Error).message || "unbekannter Fehler"}`);
     }
   }
 
@@ -365,48 +775,11 @@ async function producePreShowToChannels(socket: ReturnType<typeof io>, device: D
     try {
       const track = baseTrack.clone();
       preShowLiveTracks.push(track);
+      activeChannelTracks.set(channel.id, track);
       // Feed the same pre-show signal into the channel meter, so output level is visible in channel cards.
       await attachLevelMeter(channel.id, new MediaStream([track.clone()]));
-
-      const transportData = await emitAck<{
-        transportId: string;
-        iceParameters: unknown;
-        iceCandidates: unknown[];
-        dtlsParameters: unknown;
-      }>(socket, "broadcaster:createTransport", { sessionId: get(app).selectedSessionId, channelId: channel.id });
-
-      const sendTransport = device.createSendTransport({
-        id: transportData.transportId,
-        iceParameters: transportData.iceParameters as never,
-        iceCandidates: transportData.iceCandidates as never,
-        dtlsParameters: transportData.dtlsParameters as never
-      });
-
-      sendTransport.on("connect", async ({ dtlsParameters }, callback, errback) => {
-        try {
-          await emitAck(socket, "transport:connect", { transportId: transportData.transportId, dtlsParameters });
-          callback();
-        } catch (error) {
-          errback(error as Error);
-        }
-      });
-
-      sendTransport.on("produce", async ({ kind, rtpParameters }, callback, errback) => {
-        try {
-          const producerResponse = await emitAck<{ producerId: string }>(socket, "broadcaster:produce", {
-            transportId: transportData.transportId,
-            sessionId: get(app).selectedSessionId,
-            channelId: channel.id,
-            kind,
-            rtpParameters
-          });
-          callback({ id: producerResponse.producerId });
-        } catch (error) {
-          errback(error as Error);
-        }
-      });
-
-      await sendTransport.produce({ track });
+      const binding = await createChannelSendBinding(socket, device, channel, track);
+      replaceActiveSendBinding(channel.id, binding);
       produced.push(channel.name);
     } catch {
       failed.push(channel.name);
@@ -445,6 +818,8 @@ async function createTestToneTrack(frequencyHz = 400): Promise<MediaStreamTrack>
 
 async function stopAllOutput(silent = false): Promise<void> {
   clearPreShowAutoSwitchTimer();
+  stopBroadcasterHealthWatchdog();
+  clearBroadcasterAlert();
   app.update((s) => ({ ...s, broadcasterWantsBroadcast: false, broadcasterReconnectAttempts: 0 }));
 
   if (broadcasterReconnectTimer) {
@@ -456,13 +831,25 @@ async function stopAllOutput(silent = false): Promise<void> {
     await stopRecording();
   }
 
-  broadcasterSocket?.disconnect();
+  const socket = broadcasterSocket;
+  const sessionId = get(app).selectedSessionId;
+  await setLiveMode("none");
+  if (socket?.connected && sessionId) {
+    try {
+      await emitAck(socket, "broadcaster:stop", { sessionId });
+    } catch {
+      // The server-side disconnect grace period remains as fallback cleanup.
+    }
+  }
+  closeActiveSendBindings();
+  socket?.disconnect();
   setBroadcasterSocket(null);
 
   for (const channelStream of broadcasterChannelStreams) {
     channelStream.stream.getTracks().forEach((track) => track.stop());
   }
   setBroadcasterChannelStreams([]);
+  activeChannelTracks.clear();
 
   for (const track of preShowLiveTracks) {
     try {
@@ -524,7 +911,6 @@ async function stopAllOutput(silent = false): Promise<void> {
   stopLevelMeters();
 
   app.update((s) => ({ ...s, isBroadcasting: false, isPreshowMusicActive: false, isTestToneActive: false }));
-  await setLiveMode("none");
 
   if (!silent) {
     setStatus("broadcaster", tr("broadcast.stopped"));
@@ -567,17 +953,23 @@ export async function startBroadcast(): Promise<void> {
     app.update((s) => ({ ...s, broadcasterWantsBroadcast: true }));
 
     if (state.audioInputs.length === 0) {
-      await refreshAudioInputs(true);
+      const microphoneReady = await refreshAudioInputs(true);
+      if (!microphoneReady) {
+        throw new Error("Mikrofon nicht freigegeben. Bitte die Browser-Berechtigung prüfen und erneut auf Live drücken.");
+      }
     }
 
     const socket = await createBroadcasterSocket(state.selectedSessionId, state.sessionCode);
     const device = await loadDeviceForSocket(socket);
     const result = await produceMicToChannels(socket, device);
 
-    if (result.produced.length === 0) throw new Error(tr("broadcast.no_channel_started"));
+    if (result.produced.length === 0) {
+      throw new Error(result.failed.length > 0 ? `${tr("broadcast.no_channel_started")} ${result.failed.join("; ")}` : tr("broadcast.no_channel_started"));
+    }
 
     app.update((s) => ({ ...s, isBroadcasting: true, isPreshowMusicActive: false, isTestToneActive: false }));
     await setLiveMode("mic");
+    startBroadcasterHealthWatchdog();
     await startRecording();
 
     setStatus(
@@ -703,6 +1095,7 @@ export async function startPreShowMusic(): Promise<void> {
     preShowAudioElement = audio;
     app.update((s) => ({ ...s, isPreshowMusicActive: true, isBroadcasting: false, isTestToneActive: false }));
     await setLiveMode("preshow");
+    startBroadcasterHealthWatchdog();
     armPreShowAutoSwitchTimer();
 
     setStatus(
@@ -803,12 +1196,62 @@ export async function startTestToneBroadcast(): Promise<void> {
 
     app.update((s) => ({ ...s, isBroadcasting: false, isPreshowMusicActive: false, isTestToneActive: true }));
     await setLiveMode("testtone");
+    startBroadcasterHealthWatchdog();
     setStatus("broadcaster", `400Hz Testton aktiv auf ${result.produced.length} Kanal/Kanaelen.`);
     await refreshSessionStats();
   } catch (error) {
     app.update((s) => ({ ...s, broadcasterWantsBroadcast: false }));
     await stopAllOutput(true);
     setStatus("broadcaster", tr("status.error_prefix", { message: (error as Error).message ?? tr("broadcast.unknown_error") }));
+  }
+}
+
+export async function resumeBroadcastAfterWatchdogReload(): Promise<void> {
+  let intent: WatchdogReloadIntent | null = null;
+  try {
+    const raw = sessionStorage.getItem(WATCHDOG_RELOAD_INTENT_KEY);
+    sessionStorage.removeItem(WATCHDOG_RELOAD_INTENT_KEY);
+    if (raw) intent = JSON.parse(raw) as WatchdogReloadIntent;
+  } catch {
+    return;
+  }
+
+  const state = get(app);
+  if (!intent || intent.expiresAt < Date.now() || intent.sessionId !== state.selectedSessionId || !state.adminAuthenticated) return;
+
+  setStatus("broadcaster", "Audio-Watchdog: Sender wird nach dem Reload automatisch wieder gestartet …");
+  showBroadcasterAlert(
+    "warning",
+    "Sender wurde automatisch neu geladen",
+    `Auslöser: ${intent.reason || "instabile Audioverbindung"}.`,
+    "Der Stream wird jetzt ohne Eingriff automatisch wieder gestartet."
+  );
+  if (intent.selectedPreShowTrackId) {
+    app.update((current) => ({ ...current, selectedPreShowTrackId: intent!.selectedPreShowTrackId }));
+  }
+
+  if (intent.mode === "mic") await startBroadcast();
+  if (intent.mode === "preshow") await startPreShowMusic();
+  if (intent.mode === "testtone") await startTestToneBroadcast();
+
+  const resumedState = get(app);
+  const resumed = resumedState.isBroadcasting || resumedState.isPreshowMusicActive || resumedState.isTestToneActive;
+  if (!resumed) {
+    setStatus("broadcaster", "Automatischer Neustart fehlgeschlagen – bitte einmal Live drücken.");
+    showBroadcasterAlert(
+      "critical",
+      "Automatischer Neustart fehlgeschlagen",
+      "Der Stream konnte nach dem Reload nicht automatisch gestartet werden.",
+      "Bitte einmal auf Live drücken und Mikrofon sowie Netzwerk prüfen."
+    );
+  } else {
+    showBroadcasterAlert(
+      "success",
+      "Sender erfolgreich neu gestartet",
+      "Der Stream ist nach dem automatischen Reload wieder live.",
+      undefined,
+      10_000
+    );
   }
 }
 

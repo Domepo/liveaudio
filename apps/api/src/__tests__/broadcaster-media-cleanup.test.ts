@@ -1,7 +1,7 @@
 import axios from "axios";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { registerSocketRealtime } from "../realtime/socket";
+import { BROADCASTER_DISCONNECT_GRACE_MS, registerSocketRealtime } from "../realtime/socket";
 
 vi.mock("axios", () => ({
   default: {
@@ -12,9 +12,14 @@ vi.mock("axios", () => ({
 describe("broadcaster media cleanup", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.useFakeTimers();
   });
 
-  it("closes broadcaster transports when its signaling socket disconnects", async () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps broadcaster transports during the reconnect grace period, then closes them", async () => {
     const socketHandlers = new Map<string, (...args: any[]) => unknown>();
     const socket = {
       id: "broadcaster-socket-1",
@@ -98,12 +103,18 @@ describe("broadcaster media cleanup", () => {
 
     socketHandlers.get("disconnect")!();
 
-    await vi.waitFor(() => {
-      expect(axios.post).toHaveBeenCalledWith(
-        "http://media:4000/clients/disconnect",
-        { clientId: "broadcaster-socket-1" },
-        { headers: { Authorization: "Bearer internal-token" } }
-      );
-    });
+    expect(axios.post).not.toHaveBeenCalledWith(
+      "http://media:4000/clients/disconnect",
+      { clientId: "broadcaster-socket-1" },
+      { headers: { Authorization: "Bearer internal-token" } }
+    );
+
+    await vi.advanceTimersByTimeAsync(BROADCASTER_DISCONNECT_GRACE_MS);
+
+    expect(axios.post).toHaveBeenCalledWith(
+      "http://media:4000/clients/disconnect",
+      { clientId: "broadcaster-socket-1" },
+      { headers: { Authorization: "Bearer internal-token" } }
+    );
   });
 });

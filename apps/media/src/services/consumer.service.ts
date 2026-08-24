@@ -45,14 +45,24 @@ export async function createConsumer(input: ConsumeInput): Promise<ConsumeResult
   });
 
   consumers.set(consumer.id, consumer);
-  consumer.on("@close", () => {
+  const clearConsumerRef = () => {
     consumers.delete(consumer.id);
-  });
-  consumer.on("transportclose", () => {
-    consumers.delete(consumer.id);
-  });
+  };
+  consumer.on("@close", clearConsumerRef);
+  consumer.on("transportclose", clearConsumerRef);
+  consumer.on("producerclose", clearConsumerRef);
 
   return { type: "ok", consumer, producerId: producer.id };
+}
+
+export function closeConsumer(consumerId: string, clientId: string): "ok" | "not_found" | "forbidden" {
+  const consumer = consumers.get(consumerId);
+  if (!consumer) return "not_found";
+  const appData = (consumer.appData as { clientId?: string } | undefined) ?? {};
+  if (!appData.clientId || appData.clientId !== clientId) return "forbidden";
+  consumer.close();
+  consumers.delete(consumerId);
+  return "ok";
 }
 
 export async function resumeConsumer(consumerId: string, clientId: string): Promise<"ok" | "not_found" | "forbidden"> {

@@ -51,6 +51,16 @@ export async function connectTransport(transportId: string, dtlsParameters: unkn
   return "ok";
 }
 
+export function closeTransport(transportId: string, clientId: string): "ok" | "not_found" | "forbidden" {
+  const transport = getTransportOrNull(transportId);
+  if (!transport) return "not_found";
+  const appData = (transport.appData as { clientId?: string } | undefined) ?? {};
+  if (!appData.clientId || appData.clientId !== clientId) return "forbidden";
+  transport.close();
+  transports.delete(transportId);
+  return "ok";
+}
+
 export function disconnectClientTransports(clientId: string): number {
   const toClose: WebRtcTransport[] = [];
   for (const transport of transports.values()) {

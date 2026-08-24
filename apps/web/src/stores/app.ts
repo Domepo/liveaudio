@@ -16,6 +16,20 @@ export type PreShowTrack = {
 
 export type ListenerPlaybackState = "idle" | "connecting" | "live" | "paused" | "reconnecting" | "error";
 export type ListenerTelemetryEvent = { at: string; event: string; detail?: string };
+export type BroadcasterAlert = {
+  level: "warning" | "critical" | "success";
+  title: string;
+  message: string;
+  action?: string;
+  at: string;
+};
+export type BroadcasterQuality = {
+  state: "idle" | "measuring" | "good" | "fair" | "poor";
+  packetLossPercent: number | null;
+  jitterMs: number | null;
+  roundTripMs: number | null;
+  updatedAt: string;
+};
 
 export type AppState = {
   theme: Theme;
@@ -77,6 +91,8 @@ export type AppState = {
   audioInputs: AudioInput[];
 
   broadcasterStatus: string;
+  broadcasterAlert: BroadcasterAlert | null;
+  broadcasterQuality: BroadcasterQuality;
   isBroadcasting: boolean;
   isPreshowMusicActive: boolean;
   isTestToneActive: boolean;
@@ -192,6 +208,14 @@ const defaultState: AppState = {
   audioInputs: [],
 
   broadcasterStatus: "",
+  broadcasterAlert: null,
+  broadcasterQuality: {
+    state: "idle",
+    packetLossPercent: null,
+    jitterMs: null,
+    roundTripMs: null,
+    updatedAt: ""
+  },
   isBroadcasting: false,
   isPreshowMusicActive: false,
   isTestToneActive: false,

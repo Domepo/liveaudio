@@ -33,6 +33,7 @@ Extern öffnen:
 
 - `5173/tcp`: Web-UI
 - `40000-42000/udp`: WebRTC Audio Transport
+- `40000-42000/tcp`: WebRTC-Fallback, falls ein Client-Netz UDP blockiert
 
 Nur intern (nicht public):
 
@@ -69,6 +70,7 @@ Image:
 ## Produktions-Checkliste
 
 - starke Secrets gesetzt (`JWT_SECRET`, `MEDIA_INTERNAL_TOKEN`)
+- `MEDIA_ANNOUNCED_IP` ist die von Clients erreichbare Server-IP (nie `127.0.0.1`)
 - `NODE_ENV=production`
 - HTTPS/TLS vor App geschaltet
 - `TRUST_PROXY` korrekt konfiguriert

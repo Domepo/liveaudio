@@ -17,13 +17,19 @@ import {
 } from "../runtime";
 
 import { validateJoin } from "./join";
+import {
+  LISTENER_BAD_SAMPLES_BEFORE_RECOVERY,
+  LISTENER_QUALITY_POLL_MS,
+  evaluateInboundAudioHealth,
+  snapshotInboundAudioStats,
+  type InboundAudioSnapshot
+} from "./qualityWatchdog";
 
 let producerSwitchReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let lastProducerSwitchReconnectAt = 0;
 let activeRecvTransport: ReturnType<Device["createRecvTransport"]> | null = null;
 let activeConsumer: Awaited<ReturnType<ReturnType<Device["createRecvTransport"]>["consume"]>> | null = null;
 let activeTransportId = "";
-let activeRtpCapabilities: unknown = null;
 let activeLiveMode: "none" | "mic" | "preshow" | "testtone" = "none";
 let watchdogAudioContext: AudioContext | null = null;
 let watchdogAnalyser: AnalyserNode | null = null;
@@ -34,6 +40,10 @@ let watchdogTimer: ReturnType<typeof setInterval> | null = null;
 let watchdogLastState: "hearing" | "lost" | null = null;
 let watchdogStateSinceMs = 0;
 let watchdogReportedState: "hearing" | "lost" | null = null;
+let listenerQualityTimer: ReturnType<typeof setInterval> | null = null;
+let listenerQualityCheckInFlight = false;
+let listenerBadQualitySamples = 0;
+let listenerQualitySnapshot: InboundAudioSnapshot | null = null;
 
 function detectTestTone400(freqData: Float32Array, sampleRate: number): boolean {
   const nyquist = sampleRate / 2;
@@ -222,54 +232,93 @@ async function ensureAudioPlayback(): Promise<void> {
   throw new Error("Audio Wiedergabe konnte nicht gestartet werden");
 }
 
-async function replaceActiveConsumerTrack(): Promise<void> {
-  const state = get(app);
-  const socket = listenerSocket;
-  if (!socket || !activeRecvTransport || !activeTransportId || !activeRtpCapabilities || !state.listenerSessionId || !state.activeListeningChannelId) return;
-
-  const consumeData = await emitAck<{
-    consumerId: string;
-    producerId: string;
-    kind: "audio";
-    rtpParameters: unknown;
-  }>(socket, "listener:consume", {
-    transportId: activeTransportId,
-    sessionId: state.listenerSessionId,
-    channelId: state.activeListeningChannelId,
-    rtpCapabilities: activeRtpCapabilities
-  });
-
-  const nextConsumer = await activeRecvTransport.consume({
-    id: consumeData.consumerId,
-    producerId: consumeData.producerId,
-    kind: consumeData.kind,
-    rtpParameters: consumeData.rtpParameters as never
-  });
-  await emitAck(socket, "consumer:resume", { consumerId: consumeData.consumerId });
-
-  if (!listenerAudioEl) throw new Error("Audio element not available");
-  listenerAudioEl.srcObject = new MediaStream([nextConsumer.track]);
-  await ensureAudioPlayback();
-
-  const previous = activeConsumer;
-  activeConsumer = nextConsumer;
-  if (previous) {
+function closeActiveListenerMedia(): void {
+  activeTransportId = "";
+  const consumer = activeConsumer;
+  activeConsumer = null;
+  if (consumer) {
     try {
-      previous.close();
+      consumer.close();
+    } catch {
+      // ignore cleanup error
+    }
+  }
+  const recvTransport = activeRecvTransport;
+  activeRecvTransport = null;
+  if (recvTransport) {
+    try {
+      recvTransport.close();
     } catch {
       // ignore cleanup error
     }
   }
 }
 
-function scheduleListenerReconnect(reason: string, forceDisconnect = false): void {
+function stopListenerQualityWatchdog(): void {
+  if (listenerQualityTimer) {
+    clearInterval(listenerQualityTimer);
+    listenerQualityTimer = null;
+  }
+  listenerQualityCheckInFlight = false;
+  listenerBadQualitySamples = 0;
+  listenerQualitySnapshot = null;
+}
+
+async function checkListenerAudioQuality(): Promise<void> {
+  if (listenerQualityCheckInFlight || !activeConsumer || !get(app).listenerWantsListen) return;
+  const consumer = activeConsumer;
+  listenerQualityCheckInFlight = true;
+  try {
+    const snapshot = snapshotInboundAudioStats(await consumer.getStats());
+    if (activeConsumer !== consumer) return;
+    const health = evaluateInboundAudioHealth(listenerQualitySnapshot, snapshot);
+    listenerQualitySnapshot = snapshot;
+    listenerBadQualitySamples = health.state === "healthy" ? 0 : listenerBadQualitySamples + 1;
+    if (listenerBadQualitySamples >= LISTENER_BAD_SAMPLES_BEFORE_RECOVERY) {
+      listenerBadQualitySamples = 0;
+      scheduleListenerReconnect(`Audio-Watchdog: ${health.reason}`);
+    }
+  } catch {
+    if (activeConsumer !== consumer) return;
+    listenerBadQualitySamples += 1;
+    if (listenerBadQualitySamples >= LISTENER_BAD_SAMPLES_BEFORE_RECOVERY) {
+      listenerBadQualitySamples = 0;
+      scheduleListenerReconnect("Audio-Watchdog: WebRTC-Statistik nicht erreichbar");
+    }
+  } finally {
+    listenerQualityCheckInFlight = false;
+  }
+}
+
+function startListenerQualityWatchdog(): void {
+  stopListenerQualityWatchdog();
+  listenerQualityTimer = setInterval(() => {
+    void checkListenerAudioQuality();
+  }, LISTENER_QUALITY_POLL_MS);
+}
+
+function scheduleListenerReconnect(reason: string): void {
   const s = get(app);
   if (!s.listenerWantsListen || !s.activeListeningChannelId || listenerReconnectTimer) return;
 
-  if (forceDisconnect) {
-    listenerSocket?.disconnect();
-    setListenerSocket(null);
-  }
+  const nextAttempts = s.listenerReconnectAttempts + 1;
+  app.update((prev) => ({ ...prev, listenerReconnectAttempts: nextAttempts }));
+  stopListenerQualityWatchdog();
+
+  // Install the timer before disconnecting: Socket.IO emits "disconnect"
+  // synchronously, and that handler must not schedule a second reconnect.
+  const delay = Math.min(10_000, 300 * 2 ** (nextAttempts - 1));
+  setListenerReconnectTimer(
+    setTimeout(() => {
+      setListenerReconnectTimer(null);
+      void startListening(get(app).activeListeningChannelId);
+    }, jitterMs(delay))
+  );
+
+  const socket = listenerSocket;
+  setListenerSocket(null);
+  socket?.disconnect();
+  closeActiveListenerMedia();
 
   if (listenerAudioEl) {
     listenerAudioEl.pause();
@@ -279,22 +328,12 @@ function scheduleListenerReconnect(reason: string, forceDisconnect = false): voi
   app.update((prev) => ({ ...prev, isListening: false }));
   updateMediaSessionState("paused");
   setStatus("listener", tr("status.listener_reconnect", { reason }));
-
-  const nextAttempts = s.listenerReconnectAttempts + 1;
-  app.update((prev) => ({ ...prev, listenerReconnectAttempts: nextAttempts }));
-
-  const delay = Math.min(10_000, 300 * 2 ** (nextAttempts - 1));
-  setListenerReconnectTimer(
-    setTimeout(() => {
-      setListenerReconnectTimer(null);
-      void startListening(get(app).activeListeningChannelId);
-    }, jitterMs(delay))
-  );
 }
 
 export async function stopListening(options?: { preserveIntent?: boolean; silent?: boolean }): Promise<void> {
   const preserveIntent = options?.preserveIntent ?? false;
   const silent = options?.silent ?? false;
+  stopListenerQualityWatchdog();
 
   if (!preserveIntent) {
     app.update((s) => ({ ...s, listenerWantsListen: false, listenerReconnectAttempts: 0 }));
@@ -304,26 +343,29 @@ export async function stopListening(options?: { preserveIntent?: boolean; silent
     }
   }
 
-  listenerSocket?.disconnect();
+  const socket = listenerSocket;
+  const consumerId = activeConsumer?.id ?? "";
+  const transportId = activeTransportId;
   setListenerSocket(null);
-  activeTransportId = "";
-  activeRtpCapabilities = null;
-  if (activeConsumer) {
-    try {
-      activeConsumer.close();
-    } catch {
-      // ignore cleanup error
+  closeActiveListenerMedia();
+
+  if (socket?.connected) {
+    if (consumerId) {
+      try {
+        await emitAck(socket, "consumer:close", { consumerId });
+      } catch {
+        // disconnect cleanup is the fallback
+      }
     }
-    activeConsumer = null;
-  }
-  if (activeRecvTransport) {
-    try {
-      activeRecvTransport.close();
-    } catch {
-      // ignore cleanup error
+    if (transportId) {
+      try {
+        await emitAck(socket, "transport:close", { transportId });
+      } catch {
+        // disconnect cleanup is the fallback
+      }
     }
-    activeRecvTransport = null;
   }
+  socket?.disconnect();
 
   if (listenerAudioEl) {
     listenerAudioEl.pause();
@@ -370,10 +412,12 @@ export async function startListening(channelIdOverride?: string): Promise<void> 
     if (!get(app).listenerSessionId) return;
   }
 
-  if (get(app).isListening) await stopListening();
+  if (get(app).isListening || listenerSocket || activeRecvTransport) {
+    await stopListening({ preserveIntent: true, silent: true });
+  }
 
   try {
-    app.update((s) => ({ ...s, listenerWantsListen: true }));
+    app.update((s) => ({ ...s, listenerWantsListen: true, activeListeningChannelId: targetChannelId }));
     const socket = io(wsUrl, {
       withCredentials: true,
       auth: { role: "LISTENER", sessionCode: get(app).listenerCode.trim() },
@@ -386,11 +430,12 @@ export async function startListening(channelIdOverride?: string): Promise<void> 
     setListenerSocket(socket);
 
     socket.on("disconnect", (reason) => {
+      if (listenerSocket !== socket) return;
       scheduleListenerReconnect(String(reason));
     });
     socket.on("broadcast:ownershipChanged", (payload: { takeover?: boolean } | undefined) => {
       if (payload?.takeover) {
-        scheduleListenerReconnect("broadcast takeover", true);
+        scheduleListenerReconnect("broadcast takeover");
       }
     });
     socket.on("broadcast:liveModeChanged", (payload: { mode?: "none" | "mic" | "preshow" | "testtone" } | undefined) => {
@@ -413,9 +458,7 @@ export async function startListening(channelIdOverride?: string): Promise<void> 
       producerSwitchReconnectTimer = setTimeout(() => {
         producerSwitchReconnectTimer = null;
         lastProducerSwitchReconnectAt = Date.now();
-        void replaceActiveConsumerTrack().catch(() => {
-          scheduleListenerReconnect("producer switched", true);
-        });
+        scheduleListenerReconnect("producer switched");
       }, 450);
     });
 
@@ -424,7 +467,6 @@ export async function startListening(channelIdOverride?: string): Promise<void> 
     const caps = await emitAck<{ rtpCapabilities: unknown }>(socket, "session:getRtpCapabilities", {});
     const device = new Device();
     await device.load({ routerRtpCapabilities: caps.rtpCapabilities as never });
-    activeRtpCapabilities = device.rtpCapabilities;
 
     await emitAck(socket, "listener:joinSession", { channelId: targetChannelId });
     const transportData = await emitAck<{
@@ -440,6 +482,8 @@ export async function startListening(channelIdOverride?: string): Promise<void> 
       iceCandidates: transportData.iceCandidates as never,
       dtlsParameters: transportData.dtlsParameters as never
     });
+    activeRecvTransport = recvTransport;
+    activeTransportId = transportData.transportId;
 
     recvTransport.on("connect", async ({ dtlsParameters }, callback, errback) => {
       try {
@@ -450,6 +494,7 @@ export async function startListening(channelIdOverride?: string): Promise<void> 
       }
     });
     recvTransport.on("connectionstatechange", (connectionState) => {
+      if (activeRecvTransport !== recvTransport) return;
       if (connectionState === "failed" || connectionState === "disconnected" || connectionState === "closed") {
         scheduleListenerReconnect(`transport ${connectionState}`);
       }
@@ -473,7 +518,9 @@ export async function startListening(channelIdOverride?: string): Promise<void> 
       kind: consumeData.kind,
       rtpParameters: consumeData.rtpParameters as never
     });
+    activeConsumer = consumer;
     consumer.track.addEventListener("ended", () => {
+      if (activeConsumer !== consumer) return;
       scheduleListenerReconnect("track ended");
     });
 
@@ -487,23 +534,26 @@ export async function startListening(channelIdOverride?: string): Promise<void> 
     }
 
     await emitAck(socket, "consumer:resume", { consumerId: consumeData.consumerId });
-    activeRecvTransport = recvTransport;
-    activeConsumer = consumer;
-    activeTransportId = transportData.transportId;
     app.update((s) => ({ ...s, isListening: true, activeListeningChannelId: targetChannelId, listenerReconnectAttempts: 0 }));
+    startListenerQualityWatchdog();
     updateMediaSessionMetadata();
     updateMediaSessionState("playing");
     setStatus("listener", tr("status.listener_live_audio"));
   } catch (error) {
     await stopListening({ preserveIntent: true, silent: true });
     updateMediaSessionState("paused");
-    setStatus("listener", tr("status.error_prefix", { message: (error as Error).message }));
+    const message = (error as Error).message;
+    if (get(app).listenerWantsListen) {
+      scheduleListenerReconnect(message);
+    } else {
+      setStatus("listener", tr("status.error_prefix", { message }));
+    }
   }
 }
 
 export async function toggleChannelPlayback(channelId: string): Promise<void> {
   const state = get(app);
-  if (state.isListening && state.activeListeningChannelId === channelId) {
+  if (state.listenerWantsListen && state.activeListeningChannelId === channelId) {
     await stopListening();
     return;
   }

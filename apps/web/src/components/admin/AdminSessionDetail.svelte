@@ -3,6 +3,7 @@
   import { t } from "../../i18n";
   import { app } from "../../stores/app";
   import { apiUrl } from "../../lib/config";
+  import { getUserMediaWithTimeout } from "../../lib/media";
   import { shortId } from "../../lib/format";
   import { channelDbToPercent, channelIsLive, meterBarClass } from "../../controllers/channels";
   import { deleteSession } from "../../controllers/admin/sessions";
@@ -24,6 +25,25 @@
   let mobileMediaQuery: MediaQueryList | null = null;
   let mobileMediaQueryListener: ((event: MediaQueryListEvent) => void) | null = null;
   $: isLiveOnAir = $app.isBroadcasting || $app.isPreshowMusicActive || $app.isTestToneActive;
+  $: quality = $app.broadcasterQuality;
+  $: qualityLabel =
+    quality.state === "good"
+      ? $t("detail.quality_good")
+      : quality.state === "fair"
+        ? $t("detail.quality_fair")
+        : quality.state === "poor"
+          ? $t("detail.quality_poor")
+          : quality.state === "measuring"
+            ? $t("detail.quality_measuring")
+            : $t("common.offline");
+  $: qualityDotClass =
+    quality.state === "good"
+      ? "bg-emerald-500"
+      : quality.state === "fair"
+        ? "bg-amber-500"
+        : quality.state === "poor"
+          ? "bg-red-500"
+          : "bg-slate-400";
   let isSwitchingLive = false;
 
   $: broadcastOccupiedByOther = $app.broadcastOccupiedByOther && !$app.isBroadcasting;
@@ -90,7 +110,7 @@
       const constraints: MediaTrackConstraints = deviceId
         ? { deviceId: { exact: deviceId }, autoGainControl: true, noiseSuppression: true, echoCancellation: true }
         : { autoGainControl: true, noiseSuppression: true, echoCancellation: true };
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: constraints, video: false });
+      const stream = await getUserMediaWithTimeout({ audio: constraints, video: false });
       if (token !== micPreviewToken) {
         for (const track of stream.getTracks()) track.stop();
         return;
@@ -179,12 +199,11 @@
       <p class="mt-1 text-2xl font-black">{$app.sessionStats.listenersConnected}</p>
     </div>
     <div class="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
-      <p class="text-xs text-slate-500">{$t("detail.broadcasters_online")}</p>
-      <p class="mt-1 text-2xl font-black">{$app.sessionStats.broadcastersConnected}</p>
-    </div>
-    <div class="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
-      <p class="text-xs text-slate-500">{$t("detail.active_producers")}</p>
-      <p class="mt-1 text-2xl font-black">{$app.sessionStats.activeProducerChannels}</p>
+      <p class="text-xs text-slate-500">{$t("detail.sender")}</p>
+      <div class="mt-1 flex items-baseline gap-2">
+        <p class="text-2xl font-black">{$app.sessionStats.broadcastersConnected}</p>
+        <p class="text-xs font-semibold text-slate-500">{$app.sessionStats.activeProducerChannels} {$t("detail.producers")}</p>
+      </div>
     </div>
     <div class="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
       <p class="text-xs text-slate-500">{$t("admin.kpi_channels")}</p>
@@ -193,6 +212,24 @@
     <div class="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
       <p class="text-xs text-slate-500">{$t("detail.joins_24h")}</p>
       <p class="mt-1 text-2xl font-black">{$app.sessionStats.joinEvents24h}</p>
+    </div>
+    <div class="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900" aria-live="polite">
+      <div class="flex items-center justify-between gap-2">
+        <p class="text-xs text-slate-500">{$t("detail.audio_quality")}</p>
+        <span class="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+          <span class={`size-2 rounded-full ${qualityDotClass}`}></span>
+          {qualityLabel}
+        </span>
+      </div>
+      <div class="mt-1 flex items-baseline gap-1.5">
+        <p class="text-2xl font-black tabular-nums">{quality.packetLossPercent === null ? "–" : `${quality.packetLossPercent.toFixed(1)}%`}</p>
+        <p class="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{$t("detail.packet_loss")}</p>
+      </div>
+      <p class="mt-0.5 text-[11px] text-slate-500">
+        {$t("detail.jitter")}: {quality.jitterMs === null ? "–" : `${quality.jitterMs} ms`}
+        <span class="px-1">·</span>
+        RTT: {quality.roundTripMs === null ? "–" : `${quality.roundTripMs} ms`}
+      </p>
     </div>
   </div>
 
@@ -236,6 +273,14 @@
             <path d="M21 12a9 9 0 0 1-15.55 6.36L3 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
           </svg>
         </button>
+        {#if $app.broadcasterStatus}
+          <p
+            class={`mt-2 text-xs ${$app.broadcasterStatus.toLowerCase().startsWith("fehler") ? "font-semibold text-red-600 dark:text-red-400" : "text-slate-500 dark:text-slate-400"}`}
+            role="status"
+          >
+            {$app.broadcasterStatus}
+          </p>
+        {/if}
       </div>
 
       <div class="mt-4 hidden rounded-2xl border border-slate-200 bg-slate-50 p-1 md:grid md:grid-cols-3 dark:border-slate-700 dark:bg-slate-950/60" role="tablist" aria-label="Ansicht auswählen">

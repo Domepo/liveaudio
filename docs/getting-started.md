@@ -44,7 +44,9 @@ services:
       POSTGRES_DB: livevoice
       POSTGRES_PASSWORD: change-me-postgres
       DATABASE_URL: postgresql://postgres:change-me-postgres@postgres:5432/livevoice?schema=public
-      API_PORT: 3000
+      NODE_ENV: production
+      RUNNING_IN_DOCKER: 1
+      API_PORT: 3001
       API_HOST: 0.0.0.0
       MEDIA_PORT: 4000
       MEDIA_LISTEN_IP: 0.0.0.0
@@ -60,8 +62,9 @@ services:
       ADMIN_PASSWORD_HASH: <BCRYPT_HASH>
     ports:
       - "5173:5173"
-      - "3000:3000"
+      - "3001:3001"
       - "40000-42000:40000-42000/udp"
+      - "40000-42000:40000-42000/tcp"
 
 volumes:
   pgdata:
@@ -86,6 +89,7 @@ Pflicht:
 
 - `5173/tcp` (Weboberfläche)
 - `40000-42000/udp` (WebRTC Audio)
+- `40000-42000/tcp` (WebRTC-Fallback, falls UDP im Client-Netz blockiert ist)
 
 Optional/Intern:
 
