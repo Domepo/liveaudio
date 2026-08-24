@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
   make \
   g++ \
   ffmpeg \
+  procps \
   postgresql-client \
   && rm -rf /var/lib/apt/lists/*
 
