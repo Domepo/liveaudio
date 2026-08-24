@@ -37,7 +37,7 @@ async function poll() {
       process.exit(1);
     }
   }
-  setTimeout(poll, intervalMs).unref();
+  setTimeout(poll, intervalMs);
 }
 
 function shutdown() {
