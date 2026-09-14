@@ -4,8 +4,9 @@ import type { RouterRtpCodecCapability } from "mediasoup/node/lib/types";
 export const MEDIA_PORT = Number(process.env.MEDIA_PORT ?? 4000);
 export const MEDIA_HOST = process.env.MEDIA_HOST ?? "0.0.0.0";
 export const MEDIA_LISTEN_IP = process.env.MEDIA_LISTEN_IP ?? "0.0.0.0";
-export const RTC_MIN_PORT = Number(process.env.RTC_MIN_PORT ?? 40000);
-export const RTC_MAX_PORT = Number(process.env.RTC_MAX_PORT ?? 49999);
+// Prefer the dedicated single-port setting. RTC_MIN_PORT remains a fallback so
+// existing deployments can upgrade without changing their environment first.
+export const RTC_PORT = Number(process.env.RTC_PORT ?? process.env.RTC_MIN_PORT ?? 40000);
 export const MEDIA_INTERNAL_TOKEN = process.env.MEDIA_INTERNAL_TOKEN?.trim() || "";
 
 function detectLanIp(): string {
@@ -64,8 +65,8 @@ export function assertMediaSecurityConfig(): void {
   if (!announcedIpFromEnv || invalidAnnouncedAddresses.has(announcedIpFromEnv.toLowerCase())) {
     errors.push("MEDIA_ANNOUNCED_IP must be the externally reachable server IP, not localhost or a wildcard address.");
   }
-  if (!Number.isInteger(RTC_MIN_PORT) || !Number.isInteger(RTC_MAX_PORT) || RTC_MIN_PORT < 1 || RTC_MAX_PORT > 65535 || RTC_MIN_PORT > RTC_MAX_PORT) {
-    errors.push("RTC_MIN_PORT/RTC_MAX_PORT define an invalid port range.");
+  if (!Number.isInteger(RTC_PORT) || RTC_PORT < 1 || RTC_PORT > 65535) {
+    errors.push("RTC_PORT must be a valid TCP/UDP port.");
   }
 
   if (errors.length) {

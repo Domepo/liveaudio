@@ -1,21 +1,10 @@
 import type { Router, WebRtcTransport } from "mediasoup/node/lib/types";
-import { MEDIA_ANNOUNCED_IP, MEDIA_LISTEN_IP } from "../config/media";
 import { transports } from "../state/media-state";
+import { getWebRtcServer } from "./worker.service";
 
 export async function createWebRtcTransport(router: Router): Promise<WebRtcTransport> {
   const transport = await router.createWebRtcTransport({
-    listenInfos: [
-      {
-        protocol: "udp",
-        ip: MEDIA_LISTEN_IP,
-        announcedAddress: MEDIA_ANNOUNCED_IP
-      },
-      {
-        protocol: "tcp",
-        ip: MEDIA_LISTEN_IP,
-        announcedAddress: MEDIA_ANNOUNCED_IP
-      }
-    ],
+    webRtcServer: getWebRtcServer(),
     enableUdp: true,
     enableTcp: true,
     preferUdp: true,

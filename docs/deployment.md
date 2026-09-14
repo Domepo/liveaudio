@@ -32,8 +32,13 @@ Voraussetzungen:
 Extern öffnen:
 
 - `5173/tcp`: Web-UI
-- `40000-42000/udp`: WebRTC Audio Transport
-- `40000-42000/tcp`: WebRTC-Fallback, falls ein Client-Netz UDP blockiert
+- `40000/udp`: WebRTC Audio Transport
+- `40000/tcp`: WebRTC-Fallback, falls ein Client-Netz UDP blockiert
+
+Alle WebRTC-Transporte teilen sich über den mediasoup `WebRtcServer` denselben
+Port. Ein großer Portbereich ist daher nicht erforderlich. Falls `RTC_PORT`
+abweichend konfiguriert wird, muss nur dieser eine Port für UDP und optional
+für TCP freigegeben werden.
 
 Nur intern (nicht public):
 
@@ -95,4 +100,3 @@ Empfohlen:
 - immutable Image-Tags je Release
 - DB-Änderungen vorher sichern
 - Release Notes mit Breaking Changes dokumentieren
-

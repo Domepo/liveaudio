@@ -50,11 +50,12 @@ Passwörter für Admin-Change und User-Management:
 - `MEDIA_HOST`
 - `MEDIA_LISTEN_IP`
 - `MEDIA_ANNOUNCED_IP`
-- `RTC_MIN_PORT`
-- `RTC_MAX_PORT`
+- `RTC_PORT` (gemeinsamer UDP-/TCP-Port für alle WebRTC-Transporte)
 - `MEDIA_INTERNAL_TOKEN` (muss identisch zur API sein)
+
+Für die Migration bestehender Installationen wird `RTC_MIN_PORT` noch als
+Fallback für `RTC_PORT` gelesen. `RTC_MAX_PORT` wird nicht mehr benötigt.
 
 ## Beispiel
 
 Siehe `.env.example` im Repo-Root für ein praktisches Start-Template.
-
