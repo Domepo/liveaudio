@@ -43,8 +43,7 @@ services:
       MEDIA_PORT: 4000
       MEDIA_LISTEN_IP: 0.0.0.0
       MEDIA_ANNOUNCED_IP: "${MEDIA_ANNOUNCED_IP:?MEDIA_ANNOUNCED_IP must be set to the public server IP}"
-      RTC_MIN_PORT: 40000
-      RTC_MAX_PORT: 42000
+      RTC_PORT: 40000
       DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set}"
       JWT_ISSUER: liveaudio-api
@@ -58,8 +57,8 @@ services:
     ports:
       - "5173:5173"
       - "3001:3001"
-      - "40000-42000:40000-42000/udp"
-      - "40000-42000:40000-42000/tcp"
+      - "40000:40000/udp"
+      - "40000:40000/tcp"
     healthcheck:
       test: ["CMD", "node", "/app/docker/healthcheck.cjs"]
       interval: 10s
