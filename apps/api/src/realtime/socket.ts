@@ -162,10 +162,11 @@ export function registerSocketRealtime(deps: SocketDeps): void {
       }
     }
 
-    socket.on("disconnect", () => {
+    socket.on("disconnect", (reason) => {
       const explicitlyStopped = auth.role === "BROADCASTER" && explicitlyStoppedSockets.delete(socket.id);
       if (auth.role === "LISTENER") {
-        void mediaPost("/clients/disconnect", { clientId: socket.id }).catch(() => undefined);
+        const preserveConnectedListeners = reason === "transport close" || reason === "transport error" || reason === "ping timeout";
+        void mediaPost("/clients/disconnect", { clientId: socket.id, preserveConnectedListeners }).catch(() => undefined);
       } else if (!explicitlyStopped) {
         scheduleBroadcasterDisconnectCleanup(auth.sessionId, socket.id);
       }

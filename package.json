@@ -29,6 +29,7 @@
     "test:env:health": "node ./scripts/test-env-healthcheck.cjs",
     "test:load:socket:smoke": "npx artillery run ./tests/load/artillery/socket-smoke.yml --output artillery-report.json",
     "test:webrtc:smoke": "playwright test -c playwright.webrtc.config.ts",
+    "test:webrtc:background": "vitest run --config tests/webrtc/vitest.config.ts",
     "test:perf:smoke": "npm run test:env:reset && npm run test:load:socket:smoke",
     "test:perf:nightly": "npm run test:env:reset && npm run test:load:socket:smoke && npm run test:webrtc:smoke",
     "test:perf:weekly": "npm run test:perf:nightly",

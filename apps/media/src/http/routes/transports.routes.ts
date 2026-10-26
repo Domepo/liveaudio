@@ -1,18 +1,18 @@
 import type { Express } from "express";
 import { closeTransport, connectTransport, disconnectClientTransports } from "../../services/transport.service";
 
-type DisconnectBody = { clientId?: string };
+type DisconnectBody = { clientId?: string; preserveConnectedListeners?: boolean };
 type ConnectBody = { clientId?: string; transportId: string; dtlsParameters: unknown };
 type CloseBody = { clientId?: string; transportId?: string };
 
 export function registerTransportRoutes(app: Express): void {
   app.post("/clients/disconnect", async (req, res) => {
-    const { clientId } = req.body as DisconnectBody;
+    const { clientId, preserveConnectedListeners } = req.body as DisconnectBody;
     if (!clientId || typeof clientId !== "string") {
       return res.status(400).json({ error: "clientId is required" });
     }
 
-    const closedTransports = disconnectClientTransports(clientId);
+    const closedTransports = disconnectClientTransports(clientId, preserveConnectedListeners === true);
     return res.json({ ok: true, closedTransports });
   });
 
