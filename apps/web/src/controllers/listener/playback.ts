@@ -264,13 +264,25 @@ function stopListenerQualityWatchdog(): void {
   listenerQualitySnapshot = null;
 }
 
+function resetQualityWhileHidden(): boolean {
+  // Background getStats() failures/stale snapshots do not prove that the
+  // native audio receiver has stopped. Start with fresh samples on return.
+  if (document.visibilityState === "hidden") {
+    listenerQualitySnapshot = null;
+    listenerBadQualitySamples = 0;
+    return true;
+  }
+  return false;
+}
+
 async function checkListenerAudioQuality(): Promise<void> {
+  if (resetQualityWhileHidden()) return;
   if (listenerQualityCheckInFlight || !activeConsumer || !get(app).listenerWantsListen) return;
   const consumer = activeConsumer;
   listenerQualityCheckInFlight = true;
   try {
     const snapshot = snapshotInboundAudioStats(await consumer.getStats());
-    if (activeConsumer !== consumer) return;
+    if (activeConsumer !== consumer || resetQualityWhileHidden()) return;
     const health = evaluateInboundAudioHealth(listenerQualitySnapshot, snapshot);
     listenerQualitySnapshot = snapshot;
     listenerBadQualitySamples = health.state === "healthy" ? 0 : listenerBadQualitySamples + 1;
@@ -279,7 +291,7 @@ async function checkListenerAudioQuality(): Promise<void> {
       scheduleListenerReconnect(`Audio-Watchdog: ${health.reason}`);
     }
   } catch {
-    if (activeConsumer !== consumer) return;
+    if (activeConsumer !== consumer || resetQualityWhileHidden()) return;
     listenerBadQualitySamples += 1;
     if (listenerBadQualitySamples >= LISTENER_BAD_SAMPLES_BEFORE_RECOVERY) {
       listenerBadQualitySamples = 0;
@@ -422,15 +434,28 @@ export async function startListening(channelIdOverride?: string): Promise<void> 
       withCredentials: true,
       auth: { role: "LISTENER", sessionCode: get(app).listenerCode.trim() },
       reconnection: true,
-      reconnectionAttempts: 10,
       reconnectionDelay: 300,
       reconnectionDelayMax: 5000,
       timeout: 20000
     });
     setListenerSocket(socket);
 
+    let previouslyConnected = false;
+    socket.on("connect", () => {
+      if (listenerSocket !== socket) return;
+      if (previouslyConnected && activeConsumer) {
+        // The new socket has a new media owner ID. Rebuild only once signaling
+        // is usable again; until then the existing audio can keep playing.
+        scheduleListenerReconnect("signaling restored");
+      }
+      previouslyConnected = true;
+    });
     socket.on("disconnect", (reason) => {
       if (listenerSocket !== socket) return;
+      const transient = reason === "transport close" || reason === "transport error" || reason === "ping timeout";
+      if (transient && get(app).isListening && activeRecvTransport?.connectionState === "connected" && activeConsumer?.track.readyState === "live") {
+        return;
+      }
       scheduleListenerReconnect(String(reason));
     });
     socket.on("broadcast:ownershipChanged", (payload: { takeover?: boolean } | undefined) => {

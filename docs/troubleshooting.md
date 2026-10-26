@@ -54,6 +54,24 @@ Prüfen:
 - Media-Service erreichbar
 - Signaling-Logs auf Disconnect/Auth errors
 
+### Audio stoppt bei gesperrtem Handy
+
+LiveAudio verwendet ein Audioelement und die Media Session API für die
+Wiedergabeanzeige und Play/Pause auf dem Sperrbildschirm. Es gibt keinen
+zusätzlichen LiveAudio-Schalter zum Erzwingen der Hintergrundwiedergabe.
+
+Eine unterbrochene Steuerverbindung beendet eine bereits aufgebaute, intakte
+Audioverbindung nicht sofort. Der Server verwendet deren ICE-/DTLS-Zustand zur
+Lebendigkeitsprüfung. Sobald die Steuerverbindung zurückkehrt, wird die
+Medienverbindung für den neuen Verbindungsbesitzer neu aufgebaut. Ein bewusstes
+Stoppen sowie eine serverseitige Trennung bleiben wirksam. Hintergrundseitig
+fehlende oder veraltete Empfangsstatistiken allein lösen keinen Neustart aus.
+
+Bei weiteren Ausfällen Gerät, Betriebssystem, Browser-Version, WLAN/Mobilfunk,
+Zeit bis zum Abbruch und Verhalten nach dem Entsperren ermitteln. Mit demselben
+Kanal auf einem zweiten Gerät vergleichen. Die automatisierte Prüfung und die
+Grenzen gegenüber echtem Handy-Standby stehen unter [Testing](testing.md#hintergrundwiedergabe).
+
 ## Datenbankschema passt nicht
 
 Symptome:

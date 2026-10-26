@@ -41,7 +41,7 @@ export async function createConsumer(input: ConsumeInput): Promise<ConsumeResult
     producerId: producer.id,
     rtpCapabilities: input.rtpCapabilities,
     paused: true,
-    appData: { clientId: input.clientId, sessionId: input.sessionId, channelId: input.channelId }
+    appData: { clientId: input.clientId, sessionId: input.sessionId, channelId: input.channelId, transportId: input.transportId }
   });
 
   consumers.set(consumer.id, consumer);

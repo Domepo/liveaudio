@@ -14,6 +14,7 @@ npm run test:unit
 npm run test:e2e
 npm run test:load:socket:smoke
 npm run test:webrtc:smoke
+npm run test:webrtc:background
 ```
 
 ## Fokusbereiche
@@ -31,6 +32,30 @@ Pflicht bei Auth-Änderungen:
 - unautorisierter Zugriff wird abgewiesen
 - Passwortwechsel invalidiert alte Session
 - Bootstrap-Login erzwingt Passwortwechsel
+
+## Hintergrundwiedergabe
+
+`npm run test:webrtc:background` startet ausschließlich isolierte Testdienste
+auf Loopback, einen eigenen mediasoup-Worker und zwei Chromium-Clients. Es nutzt
+synthetische Sitzungsdaten und einen erzeugten Ton; eine laufende Installation
+oder deren Datenbank wird nicht angesprochen. Voraussetzung ist ein installiertes
+Chromium (`npx playwright install chromium --only-shell`). Optional kann
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` auf ein vorhandenes Chromium zeigen.
+
+Der Test prüft tatsächlich empfangene Audiopakete und Audioenergie während eines
+65 Sekunden langen Ausfalls ausschließlich der Steuerverbindung. Danach prüft er
+Wiederverbindung, bewusstes Stoppen sowie das Freigeben der Medienverbindung beim
+Sendeende. Ohne Steuerverbindung wird ein geschlossener Client über den
+ICE-Consent-Timeout von 30 Sekunden und eine Erholungsfrist von 15 Sekunden
+aufgeräumt. Ein weiterhin verbundenes, aktives Audiomedium bleibt erhalten.
+
+Ergänzende Unit-Tests prüfen vorübergehende Statistikfehler im Hintergrund,
+echte Empfangsfehler im Vordergrund, Eigentümergrenzen und ICE-Erholung.
+Diese Tests ersetzen keinen Standby-Test am echten Handy: Für eine Geräteabnahme
+Android/iOS, Browser-Version, Netzwerk und Energiesparmodus festhalten und mehrere
+Minuten mit gesperrtem Bildschirm hören. Dabei zusätzlich bewusstes Stoppen und
+Fortsetzen nach dem Entsperren prüfen. Die Media Session API stellt
+Sperrbildschirm-Bedienelemente bereit, garantiert jedoch keine Hintergrundausführung.
 
 ## Testumgebung
 

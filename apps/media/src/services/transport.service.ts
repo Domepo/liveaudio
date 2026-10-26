@@ -1,6 +1,7 @@
 import type { Router, WebRtcTransport } from "mediasoup/node/lib/types";
 import { MEDIA_ANNOUNCED_IP, MEDIA_LISTEN_IP } from "../config/media";
-import { transports } from "../state/media-state";
+import { consumers, transports } from "../state/media-state";
+import { hasConnectedMedia, retainConnectedListener } from "./detached-listener";
 
 export async function createWebRtcTransport(router: Router): Promise<WebRtcTransport> {
   const transport = await router.createWebRtcTransport({
@@ -19,6 +20,7 @@ export async function createWebRtcTransport(router: Router): Promise<WebRtcTrans
     enableUdp: true,
     enableTcp: true,
     preferUdp: true,
+    iceConsentTimeout: 30,
     initialAvailableOutgoingBitrate: 300000,
     appData: {}
   } as any);
@@ -61,11 +63,18 @@ export function closeTransport(transportId: string, clientId: string): "ok" | "n
   return "ok";
 }
 
-export function disconnectClientTransports(clientId: string): number {
+export function disconnectClientTransports(clientId: string, preserveConnectedListeners = false): number {
   const toClose: WebRtcTransport[] = [];
   for (const transport of transports.values()) {
     const transportClientId = (transport.appData as { clientId?: string } | undefined)?.clientId;
     if (transportClientId === clientId) {
+      if (preserveConnectedListeners && transport.appData.role === "listener" && hasConnectedMedia(transport)) {
+        const consumer = [...consumers.values()].find((item) => !item.closed && item.appData.transportId === transport.id);
+        if (consumer) {
+          retainConnectedListener(transport, consumer);
+          continue;
+        }
+      }
       toClose.push(transport);
     }
   }
